@@ -1,0 +1,28 @@
+name: Release
+
+on:
+  push:
+    tags: ['*']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm ci
+      - run: npm run test
+      - run: npm run build
+      - name: Package plugin
+        run: |
+          mkdir -p artifact
+          cp main.js manifest.json styles.css artifact/
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifact/*
+          generate_release_notes: true
