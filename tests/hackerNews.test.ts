@@ -18,7 +18,7 @@ describe("isAiRelevant", () => {
     "An agent for notes",
     "Multiple AGENTS cooperate",
     "New LLM inference engine",
-    "A small MODEL on laptops",
+    "A new LLM MODEL on laptops",
     "OpenAI releases a tool",
     "Anthropic research",
     "MCP server patterns",
@@ -27,7 +27,17 @@ describe("isAiRelevant", () => {
     expect(isAiRelevant(title)).toBe(true);
   });
 
-  it.each(["painting tips", "email client", "retail trends", "she said hello", "wooden chair"])(
+  it.each([
+    "painting tips",
+    "email client",
+    "retail trends",
+    "she said hello",
+    "wooden chair",
+    // 单独的 "model" 不算 AI：它会把这类标题也放进来。
+    // 真要讲模型，标题里几乎总同时出现 ai/llm 等词（见上面 "A new LLM MODEL"）。
+    "A small MODEL on laptops",
+    "Model T restoration",
+  ])(
     "rejects keyword substrings: %s",
     (title) => expect(isAiRelevant(title)).toBe(false),
   );

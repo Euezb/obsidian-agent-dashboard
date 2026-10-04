@@ -1,20 +1,10 @@
 import type { TrendingRepo } from "../../domain/types";
+import { isCalendarDate } from "../../domain/localDate";
+import type { RequestPort, RequestResult } from "../../infrastructure/requestPort";
+
+export type { RequestPort, RequestResult };
 
 export type GitHubPeriod = "daily" | "weekly";
-
-export interface RequestResult {
-  status: number;
-  text: string;
-  json?: unknown;
-  retryAfter?: string;
-  rateLimitRemaining?: string;
-  rateLimitReset?: string;
-}
-
-export type RequestPort = (options: {
-  url: string;
-  headers?: Record<string, string>;
-}) => Promise<RequestResult>;
 
 export type TokenProvider = () => Promise<string | undefined>;
 
@@ -147,10 +137,13 @@ const repositoryFromUrl = (href: string): { name: string; url: string } | undefi
 };
 
 const findPeriodStars = (article: Element): number | undefined => {
-  const match = /(\d[\d,. \u00a0\u202f]*(?:[km])?)\s+stars?\s+(?:today|this\s+week)\b/i.exec(
-    article.textContent ?? "",
-  );
-  return match?.[1] ? parseCount(match[1]) : undefined;
+  const text = article.textContent ?? "";
+  const match = /(\d[\d,. \u00a0\u202f]*(?:[km])?)\s+stars?\s+(?:today|this\s+week)\b/i.exec(text);
+  if (match?.[1] === undefined || match.index === undefined) return undefined;
+  // 匹配不能从数字中间起头：`12 34 stars today` 会让引擎退到 34 上重新匹配，
+  // 算出一个不存在的星数。左边若仍是数字/分隔符，整条丢弃。
+  if (/\d[\d,. \u00a0\u202f]*$/.test(text.slice(0, match.index))) return undefined;
+  return parseCount(match[1]);
 };
 
 export const parseGitHubTrending = (html: string): TrendingRepo[] => {
@@ -202,14 +195,8 @@ export const parseGitHubTrending = (html: string): TrendingRepo[] => {
   return repositories;
 };
 
-const isValidCalendarDate = (value: string): boolean => {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
-  const date = new Date(`${value}T00:00:00.000Z`);
-  return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value;
-};
-
 export const buildGitHubSearchFallbackUrl = (since: string): string => {
-  if (!isValidCalendarDate(since)) throw new TypeError("Invalid GitHub fallback date.");
+  if (!isCalendarDate(since)) throw new TypeError("Invalid GitHub fallback date.");
 
   const url = new URL("https://api.github.com/search/repositories");
   url.searchParams.set("q", `pushed:>=${since}`);

@@ -27,6 +27,8 @@ class MemoryStorage implements CacheStoragePort {
   failWrite = false;
   failRenameFrom: string | null = null;
   raceCollisionTarget: string | null = null;
+  /** Simulates a concurrent replace: this path is missing for exactly one read. */
+  vanishOnReadOnce: string | null = null;
 
   async exists(path: string): Promise<boolean> {
     this.operations.push(`exists:${path}`);
@@ -39,6 +41,14 @@ class MemoryStorage implements CacheStoragePort {
     if (this.failRead) throw new Error("sensitive read failure");
     const content = this.files.get(path);
     if (content === undefined) throw new Error("missing");
+    if (this.vanishOnReadOnce === path) {
+      // The writer parked the final entry as its backup and promotes it again
+      // right after this failure, exactly like ObsidianCacheStorage.replace.
+      this.vanishOnReadOnce = null;
+      this.files.delete(path);
+      queueMicrotask(() => { this.files.set(path, content); });
+      throw new Error("missing");
+    }
     return content;
   }
 
@@ -114,6 +124,18 @@ describe("CacheRepository.read", () => {
 
     expect(result).toEqual({ status: "fresh", envelope: envelope() });
     expect(storage.files.has("Dashboard/cache/items.backup.json")).toBe(false);
+  });
+
+  it("retries once when a concurrent replace moves the final entry away mid-read", async () => {
+    const storage = new MemoryStorage();
+    storage.files.set("Dashboard/cache/items.json", JSON.stringify(envelope()));
+    storage.vanishOnReadOnce = "Dashboard/cache/items.json";
+
+    const result = await makeRepository(storage).read("items", isItem);
+
+    expect(result).toEqual({ status: "fresh", envelope: envelope() });
+    expect(storage.operations.filter((entry) => entry === "read:Dashboard/cache/items.json"))
+      .toHaveLength(2);
   });
 
   it("returns a guarded envelope while it is fresh", async () => {

@@ -31,7 +31,10 @@ export class ObsidianCacheStorage implements CacheStoragePort {
       await this.adapter.rename(backup, to);
       targetExists = true;
     } else if (targetExists && backupExists) {
-      await this.adapter.remove(backup);
+      // A stale backup is cleanup only. On Windows it can be locked by an
+      // indexer or antivirus, and failing here would throw away a write whose
+      // data is already safely on disk.
+      await this.removeBestEffort(backup);
     }
 
     if (!targetExists) {
@@ -53,10 +56,15 @@ export class ObsidianCacheStorage implements CacheStoragePort {
       throw error;
     }
 
+    await this.removeBestEffort(backup);
+  }
+
+  private async removeBestEffort(path: string): Promise<void> {
     try {
-      await this.adapter.remove(backup);
+      await this.adapter.remove(path);
     } catch {
-      // The final is valid; stale backup cleanup is best-effort.
+      // A leftover backup or temporary file is harmless: CacheRepository.read
+      // prefers the final entry and treats the backup as recovery only.
     }
   }
 

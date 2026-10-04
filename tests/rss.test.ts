@@ -147,8 +147,13 @@ describe("collectRssNews", () => {
     }]);
   });
 
-  it("does not add a runtime XML parser dependency", () => {
+  it("keeps runtime dependencies limited to the offline metaphysics engine", () => {
     const packageJson = JSON.parse(readFileSync(resolve(process.cwd(), "package.json"), "utf8")) as { dependencies?: Record<string, string> };
-    expect(packageJson.dependencies ?? {}).toEqual({});
+    // taibu-core 提供排盘计算;lunar-javascript 是它的传递依赖,被显式声明
+    // 只为了取「今天的农历月日」这类数字字段(小六壬默认值),不引入任何联网能力。
+    expect(Object.keys(packageJson.dependencies ?? {}).sort()).toEqual([
+      "lunar-javascript",
+      "taibu-core",
+    ]);
   });
 });

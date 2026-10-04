@@ -1,11 +1,28 @@
 import { describe, expect, it } from "vitest";
 import {
-  normalizeCodexExecutableInput,
+  missingVaultFolders,
   normalizeGithubSecretName,
+  normalizePanelWidth,
   normalizeTtlMinutes,
   normalizeVaultRelativeFolder,
   parseRssFeedLines,
+  parseVaultFolderLines,
 } from "../src/settings/settingsValidation";
+
+describe("missingVaultFolders", () => {
+  it("reports only the paths the Vault does not contain", () => {
+    expect(missingVaultFolders(["代办事项", "Daily"], (path) => path === "Daily"))
+      .toEqual(["代办事项"]);
+  });
+
+  it("reports nothing for the whole-Vault scope", () => {
+    expect(missingVaultFolders([], () => false)).toEqual([]);
+  });
+
+  it("keeps the typed order when several folders are missing", () => {
+    expect(missingVaultFolders(["B", "A", "C"], (path) => path === "C")).toEqual(["B", "A"]);
+  });
+});
 
 describe("settings validation", () => {
   it.each([
@@ -33,6 +50,17 @@ describe("settings validation", () => {
     expect(normalizeTtlMinutes(input)).toBeNull();
   });
 
+  it.each([
+    [0, 0], [-5, 0], [300.4, 300], [100, 240], [240, 240], [640, 640], [5000, 1200],
+  ])("clamps a dragged notes-column width %s to %s", (input, expected) => {
+    expect(normalizePanelWidth(input)).toBe(expected);
+  });
+
+  it("rejects a non-finite notes-column width", () => {
+    expect(normalizePanelWidth(Number.NaN)).toBeNull();
+    expect(normalizePanelWidth(Number.POSITIVE_INFINITY)).toBeNull();
+  });
+
   it("trims and deduplicates RSS URLs while preserving order", () => {
     expect(parseRssFeedLines(" https://example.com/a \n\nhttp://example.com/b\nhttps://example.com/a "))
       .toEqual({ ok: true, feeds: ["https://example.com/a", "http://example.com/b"] });
@@ -43,19 +71,27 @@ describe("settings validation", () => {
     (input) => expect(parseRssFeedLines(input)).toEqual({ ok: false, feeds: [] }),
   );
 
-  it("accepts only the PATH sentinel or a safe absolute Windows exe path", () => {
-    expect(normalizeCodexExecutableInput(" codex ")).toBe("codex");
-    expect(normalizeCodexExecutableInput(String.raw` C:\Tools\Codex\codex.exe `))
-      .toBe(String.raw`C:\Tools\Codex\codex.exe`);
-    expect(normalizeCodexExecutableInput("codex.cmd")).toBeNull();
-    expect(normalizeCodexExecutableInput(String.raw`C:\Tools\..\codex.exe`)).toBeNull();
-    expect(normalizeCodexExecutableInput(String.raw`\\server\codex.exe`)).toBeNull();
-  });
 
   it("accepts only SecretStorage-compatible key names", () => {
     expect(normalizeGithubSecretName(" github-token ")).toBe("github-token");
     expect(normalizeGithubSecretName("")).toBe("");
     expect(normalizeGithubSecretName("GitHub Token")).toBeNull();
     expect(normalizeGithubSecretName("github_token")).toBeNull();
+  });
+
+  it("parses one Vault-relative task folder per line and deduplicates case-insensitively", () => {
+    expect(parseVaultFolderLines(" Daily \n\nProjects\\Plans\ndaily\n  \nInbox "))
+      .toEqual({ ok: true, folders: ["Daily", "Projects/Plans", "Inbox"] });
+    expect(parseVaultFolderLines("")).toEqual({ ok: true, folders: [] });
+  });
+
+  it.each([
+    "/absolute",
+    String.raw`C:\Vault`,
+    "../outside",
+    "Daily\n../outside",
+    "Daily/\n\nCON",
+  ])("rejects the complete task folder edit when any line is unsafe", (input) => {
+    expect(parseVaultFolderLines(input)).toEqual({ ok: false, folders: [] });
   });
 });

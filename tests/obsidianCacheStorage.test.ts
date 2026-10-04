@@ -95,6 +95,23 @@ describe("ObsidianCacheStorage", () => {
     expect(adapter.files.has("items.backup.json")).toBe(false);
   });
 
+  it("keeps a stale backup when its cleanup fails instead of failing the write", async () => {
+    const adapter = new LockedBackupAdapter();
+    adapter.files.set("items.json", "old");
+    adapter.files.set("items.backup.json", "stale");
+    adapter.files.set("items.tmp.json", "new");
+    adapter.lockedPaths.add("items.backup.json");
+    const storage = new ObsidianCacheStorage(adapter);
+
+    await expect(storage.replace("items.tmp.json", "items.json", "items.backup.json"))
+      .resolves.toBeUndefined();
+
+    expect(adapter.files.get("items.json")).toBe("new");
+    expect(adapter.files.has("items.tmp.json")).toBe(false);
+    // The locked path is left behind on purpose; the fresh final always wins.
+    expect(adapter.files.get("items.backup.json")).toBe("old");
+  });
+
   it("does not lose the last valid value when two storage instances replace concurrently", async () => {
     const adapter = new WindowsRenameAdapter();
     adapter.files.set("items.json", "old");
@@ -113,6 +130,31 @@ describe("ObsidianCacheStorage", () => {
       .toEqual(expect.arrayContaining([expect.stringMatching(/^(?:old|first|second)$/)]));
   });
 });
+
+/** fs.rename semantics (the target is overwritten) plus a path that cannot be unlinked. */
+class LockedBackupAdapter {
+  readonly files = new Map<string, string>();
+  readonly lockedPaths = new Set<string>();
+
+  async exists(path: string): Promise<boolean> { return this.files.has(path); }
+  async read(path: string): Promise<string> {
+    const value = this.files.get(path);
+    if (value === undefined) throw new Error("missing");
+    return value;
+  }
+  async write(path: string, content: string): Promise<void> { this.files.set(path, content); }
+  async rename(from: string, to: string): Promise<void> {
+    const value = this.files.get(from);
+    if (value === undefined) throw new Error("missing");
+    this.files.delete(from);
+    this.files.set(to, value);
+  }
+  async remove(path: string): Promise<void> {
+    if (this.lockedPaths.has(path)) throw new Error("EBUSY");
+    this.files.delete(path);
+  }
+  async mkdir(): Promise<void> {}
+}
 
 class WindowsRenameAdapter {
   readonly files = new Map<string, string>();

@@ -7,8 +7,10 @@ export interface DashboardTask {
   text: string;
   completed: boolean;
   dueDate?: string;
-  /** Owning note date (from the filename when present, otherwise the file's modified day), YYYY-MM-DD. */
+  /** Owning day from the task's own 📅 token, otherwise from a date in the note's path. */
   date?: string;
+  /** True when the line sits under the daily note's archive heading. */
+  archived?: boolean;
 }
 
 export interface RecentNote {
@@ -51,6 +53,8 @@ export interface NewsItem {
 export interface DailyBrief {
   date: string;
   generatedAt: number;
+  /** Whole-day digest in prose; the summary card shows this instead of repeating item rows. */
+  overview: string;
   items: Array<{
     title: string;
     url: string;

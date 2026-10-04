@@ -4,6 +4,7 @@ import type {
   VaultHealth,
 } from "../domain/types";
 import { createElement, renderModuleFallback } from "./domHelpers";
+import { renderSectionHead } from "./renderSectionHead";
 
 const BREAKDOWN_LABELS: Array<[keyof VaultHealth["breakdown"], string]> = [
   ["frontmatter", "Frontmatter"],
@@ -205,9 +206,8 @@ export function renderVaultPulse(
   container.replaceChildren();
   container.className = "ad-section";
   container.dataset.region = "pulse";
-  const title = createElement(container, "h2");
-  title.className = "ad-section__title";
-  title.textContent = "Vault 脉搏";
+  // 批注:热力图覆盖的窗口长度,说明「脉搏」看的是哪一段。
+  renderSectionHead(container, "Vault 脉搏", { meta: `${heatmap.data.length} 天` });
   const layout = createElement(container, "div");
   layout.className = "ad-pulse";
   const healthPanel = createElement(container, "div");
@@ -217,5 +217,5 @@ export function renderVaultPulse(
   renderHealth(healthPanel, health);
   renderHeatmap(heatmapPanel, heatmap);
   layout.append(healthPanel, heatmapPanel);
-  container.append(title, layout);
+  container.append(layout);
 }

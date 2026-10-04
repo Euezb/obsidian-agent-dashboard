@@ -60,6 +60,7 @@ const rssItem: NewsItem = {
 const brief: DailyBrief = {
   date: "2026-06-29",
   generatedAt: 2_000,
+  overview: "Overview",
   items: [{ title: "Brief", url: "https://example.com/brief", source: "Example", summary: "Summary" }],
 };
 
@@ -310,7 +311,7 @@ describe("FeedService cache-first composition", () => {
     expect(context.githubFetch).toHaveBeenCalledWith("daily", expect.any(Date));
   });
 
-  it("uses valid network data even when the best-effort cache write fails", async () => {
+  it("keeps fresh network data visible and reports a failed cache write for every module", async () => {
     const context = setup();
     context.storage.failWrite = true;
     const snapshots: Parameters<Parameters<typeof context.service.open>[0]>[0][] = [];
@@ -318,13 +319,23 @@ describe("FeedService cache-first composition", () => {
     await context.service.open((state) => snapshots.push(state));
 
     expect(snapshots.at(-1)).toMatchObject({
-      githubDaily: { status: "ready", data: [dailyRepo], updatedAt: 2_000 },
-      githubWeekly: { status: "ready", data: [weeklyRepo], updatedAt: 2_000 },
+      githubDaily: {
+        status: "error",
+        data: [dailyRepo],
+        updatedAt: 2_000,
+        message: "榜单已更新，但缓存写入失败。",
+      },
+      githubWeekly: {
+        status: "error",
+        data: [weeklyRepo],
+        updatedAt: 2_000,
+        message: "榜单已更新，但缓存写入失败。",
+      },
       aiNews: {
         status: "error",
         data: [rssItem],
         updatedAt: 2_000,
-        message: "资讯已更新，但缓存写入失败；今日摘要未生成。",
+        message: "资讯已更新，但缓存写入失败。",
       },
     });
   });

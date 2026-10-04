@@ -234,7 +234,7 @@ function slugifyReportName(baseName: string): string {
 
 function renderBriefSection(brief: DailyBrief): string {
   const lines = brief.items.map((item) => `- [${item.title}](${item.url}) — ${item.summary}（${item.source}）`);
-  return `${BRIEF_HEADING}\n\n${lines.join("\n")}`;
+  return `${BRIEF_HEADING}\n\n${brief.overview}\n\n${lines.join("\n")}`;
 }
 
 /**

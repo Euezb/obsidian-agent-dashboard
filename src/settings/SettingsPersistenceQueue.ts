@@ -1,3 +1,5 @@
+import { cloneSettingValue } from "../infrastructure/cloneSettingValue";
+
 export class SettingsPersistenceQueue<T extends object> {
   private tail: Promise<void> = Promise.resolve();
 
@@ -9,7 +11,7 @@ export class SettingsPersistenceQueue<T extends object> {
   update<K extends keyof T>(key: K, value: T[K]): Promise<void> {
     const operation = this.tail.then(async () => {
       const previous = clone(this.settings);
-      this.settings[key] = cloneValue(value);
+      this.settings[key] = cloneSettingValue(value);
       try {
         await this.save(clone(this.settings));
       } catch (error) {
@@ -30,15 +32,13 @@ export class SettingsPersistenceQueue<T extends object> {
 
 function clone<T extends object>(value: T): T {
   const copy = {} as T;
-  for (const key of Object.keys(value) as Array<keyof T>) copy[key] = cloneValue(value[key]);
+  for (const key of Object.keys(value) as Array<keyof T>) copy[key] = cloneSettingValue(value[key]);
   return copy;
-}
-
-function cloneValue<T>(value: T): T {
-  return (Array.isArray(value) ? [...value] : value) as T;
 }
 
 function restore<T extends object>(target: T, snapshot: T): void {
   for (const key of Object.keys(target) as Array<keyof T>) delete target[key];
-  for (const key of Object.keys(snapshot) as Array<keyof T>) target[key] = cloneValue(snapshot[key]);
+  for (const key of Object.keys(snapshot) as Array<keyof T>) {
+    target[key] = cloneSettingValue(snapshot[key]);
+  }
 }

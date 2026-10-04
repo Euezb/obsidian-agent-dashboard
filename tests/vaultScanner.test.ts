@@ -40,6 +40,53 @@ describe("VaultScanner", () => {
     expect(getFileCache).not.toHaveBeenCalled();
   });
 
+  it("re-reads a changed note for a file-change refresh instead of reusing the running scan", async () => {
+    const settings = createDefaultSettings();
+    const note = file("Tasks.md", 0, 0);
+    let markdown = "- [ ] Before";
+    let releaseFirstRead!: () => void;
+    const firstReadGate = new Promise<void>((resolve) => { releaseFirstRead = resolve; });
+    let reads = 0;
+    const cachedRead = vi.fn(async (): Promise<string> => {
+      reads += 1;
+      if (reads === 1) {
+        const beforeChange = markdown;
+        await firstReadGate;
+        return beforeChange;
+      }
+      return markdown;
+    });
+    const scanner = new VaultScanner(
+      {
+        configDir: "config",
+        getMarkdownFiles: () => [note] as unknown as TFile[],
+        cachedRead,
+      },
+      { getFileCache: () => null },
+      () => settings,
+      () => new Date(2026, 5, 29, 12),
+      () => null,
+    );
+
+    const running = scanner.scan();
+    await vi.waitFor(() => expect(cachedRead).toHaveBeenCalledOnce());
+    // The edit lands while the first scan is still reading, i.e. exactly the
+    // window a debounced file-change refresh has to survive.
+    const edited = running.then(() => {
+      markdown = "- [x] After";
+      note.stat.mtime = 1_000;
+      note.stat.size = 2;
+    });
+
+    const refreshed = scanner.scanFresh();
+    releaseFirstRead();
+    await edited;
+
+    await expect(running).resolves.toMatchObject({ tasks: [{ text: "Before", completed: false }] });
+    await expect(refreshed).resolves.toMatchObject({ tasks: [{ text: "After", completed: true }] });
+    expect(cachedRead).toHaveBeenCalledTimes(2);
+  });
+
   it("scans each included note once and deterministically aggregates local modules", async () => {
     const now = new Date(2026, 5, 29, 12);
     const day = 24 * 60 * 60 * 1000;
@@ -132,14 +179,18 @@ describe("VaultScanner", () => {
     expect(result.recentNotes.map((note) => note.path)).toEqual(["Healthy.md"]);
   });
 
-  it("assigns each task the note date from the filename or falls back to the modified day", async () => {
+  it("dates tasks from their own due token or the note filename and never from the modified day", async () => {
     const dated = file("Daily/2026-06-28.md", 1);
     const undated = file("Inbox/scratch.md", 2, new Date(2026, 5, 27, 10).getTime());
+    const dueDated = file("Projects/plan.md", 3, new Date(2026, 5, 20, 10).getTime());
     const scanner = new VaultScanner(
       {
         configDir: ".config",
-        getMarkdownFiles: () => [dated, undated] as unknown as TFile[],
-        cachedRead: vi.fn().mockResolvedValue("- [ ] Task"),
+        getMarkdownFiles: () => [dated, undated, dueDated] as unknown as TFile[],
+        cachedRead: vi.fn(async (candidate: TFile) =>
+          candidate.path === "Projects/plan.md"
+            ? "- [ ] Ship it 📅 2026-06-29"
+            : "- [ ] Task"),
       },
       { getFileCache: vi.fn().mockReturnValue(null) },
       createDefaultSettings,
@@ -148,7 +199,65 @@ describe("VaultScanner", () => {
     );
 
     const result = await scanner.scan();
-    expect(result.tasks.map((task) => task.date)).toEqual(["2026-06-28", "2026-06-27"]);
+    expect(result.tasks.map(({ path, date }) => ({ path, date }))).toEqual([
+      { path: "Daily/2026-06-28.md", date: "2026-06-28" },
+      { path: "Inbox/scratch.md", date: undefined },
+      { path: "Projects/plan.md", date: "2026-06-29" },
+    ]);
+  });
+
+  it("collects tasks only from the task folders while every other module still sees all notes", async () => {
+    const now = new Date(2026, 5, 29, 12);
+    const notes = [
+      file("docs/superpowers/plans/2026-07-31-plan.md", now.getTime()),
+      file("Daily/2026-06-29.md", now.getTime()),
+    ];
+    const scanner = new VaultScanner(
+      {
+        configDir: ".config",
+        getMarkdownFiles: () => notes as unknown as TFile[],
+        cachedRead: vi.fn().mockResolvedValue("- [ ] Task"),
+      },
+      { getFileCache: vi.fn().mockReturnValue(null) },
+      () => ({ ...createDefaultSettings(), taskExcludeFolders: ["docs"] }),
+      () => new Date(now),
+      () => null,
+    );
+
+    const result = await scanner.scan();
+    expect(result.tasks.map((task) => task.path)).toEqual(["Daily/2026-06-29.md"]);
+    expect(result.recentNotes).toHaveLength(2);
+    expect(result.heatmap.at(-1)).toEqual({ date: "2026-06-29", count: 2 });
+  });
+
+  it("treats a non-empty include list as the only task source and lets exclusions win", async () => {
+    const notes = [
+      file("Daily/2026-06-29.md", 1),
+      file("Inbox/a.md", 2),
+      file("Projects/keep.md", 3),
+      file("Projects/Shared/plan.md", 4),
+    ];
+    const scanner = new VaultScanner(
+      {
+        configDir: ".config",
+        getMarkdownFiles: () => notes as unknown as TFile[],
+        cachedRead: vi.fn().mockResolvedValue("- [ ] Task"),
+      },
+      { getFileCache: vi.fn().mockReturnValue(null) },
+      () => ({
+        ...createDefaultSettings(),
+        taskIncludeFolders: ["Daily", "Projects"],
+        taskExcludeFolders: ["Projects/Shared"],
+      }),
+      () => new Date(2026, 5, 29),
+      () => null,
+    );
+
+    const result = await scanner.scan();
+    expect(result.tasks.map((task) => task.path)).toEqual([
+      "Daily/2026-06-29.md",
+      "Projects/keep.md",
+    ]);
   });
 
   it("reuses per-file results when mtime and size are unchanged between scans", async () => {

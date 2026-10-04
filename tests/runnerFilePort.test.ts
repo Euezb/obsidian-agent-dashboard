@@ -6,7 +6,7 @@ import {
   NodeRunnerFilePort,
   RunnerOutputTooLargeError,
   UnsafeRunnerPathError,
-} from "../src/features/codex/CodexRunner";
+} from "../src/infrastructure/safeFilePort";
 
 const temporaryRoots: string[] = [];
 

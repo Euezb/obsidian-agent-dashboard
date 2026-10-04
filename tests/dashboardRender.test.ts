@@ -1,8 +1,16 @@
 /* eslint-disable obsidianmd/prefer-active-doc -- happy-dom tests intentionally use their isolated document. */
 import { describe, expect, it, vi } from "vitest";
 import { MOCK_DASHBOARD_STATE } from "../src/data/mockDashboard";
+import { localDateKey } from "../src/features/vault/VaultScanner";
 import { renderDashboard } from "../src/view/renderState";
+import { createTodayInteractionState } from "../src/view/renderToday";
 
+/** happy-dom may not ship PointerEvent; the handler only reads clientX and button. */
+function pointerEvent(type: string, clientX: number): Event {
+  const ctor = (window as unknown as { PointerEvent?: typeof PointerEvent }).PointerEvent;
+  if (typeof ctor === "function") return new ctor(type, { clientX, button: 0, bubbles: true });
+  return new MouseEvent(type, { clientX, button: 0, bubbles: true });
+}
 describe("renderDashboard", () => {
   it("renders the four approved regions in reading order", () => {
     const container = document.createElement("div");
@@ -23,6 +31,11 @@ describe("renderDashboard", () => {
     expect(container.querySelector(".ad-eyebrow")?.textContent).toBe(
       "Agent Dashboard",
     );
+    // 未开启卜筮时,头部不渲染黄历卡,也没有卜筮板块。
+    expect(container.querySelector(".ad-almanac")).toBeNull();
+    expect(
+      Array.from(container.querySelectorAll("[data-region]")),
+    ).toHaveLength(4);
 
     cleanup();
   });
@@ -135,7 +148,8 @@ describe("renderDashboard", () => {
       status: "自动更新完成",
       onNewDiary: vi.fn(),
     });
-    const switcher = container.querySelector(".ad-segmented");
+    // 今日发现里现在有两个分段控件(新闻页签 + 榜单周期),这里只针对榜单那个。
+    const switcher = container.querySelector('[data-discovery-column="ranking"] .ad-segmented');
     expect(switcher?.getAttribute("role")).toBe("group");
     expect(switcher?.getAttribute("aria-label")).toBe("GitHub 榜单周期");
 
@@ -205,19 +219,215 @@ describe("renderDashboard", () => {
       onNewDiary: vi.fn(),
       onToggleTask,
     });
-    const checkbox = container.querySelector<HTMLInputElement>(".ad-task input");
+    const item = container.querySelector<HTMLElement>('.ad-task[data-completed="false"]');
+    const expected = MOCK_DASHBOARD_STATE.tasks.data.find(
+      (task) => item?.textContent?.includes(task.text) ?? false,
+    );
+    const checkbox = item?.querySelector<HTMLInputElement>("input") ?? null;
+    expect(expected).toBeDefined();
     expect(checkbox?.checked).toBe(false);
     expect(checkbox?.disabled).toBe(false);
 
     checkbox?.click();
 
-    expect(onToggleTask).toHaveBeenCalledWith(MOCK_DASHBOARD_STATE.tasks.data[0]);
+    expect(onToggleTask).toHaveBeenCalledWith(expected);
     expect(checkbox?.checked).toBe(false);
     expect(checkbox?.disabled).toBe(true);
 
     cleanup();
     checkbox?.click();
     expect(onToggleTask).toHaveBeenCalledOnce();
+  });
+
+  it("mounts the ready daily brief into its own tab beside the news list", () => {
+    const container = document.createElement("div");
+    const brief = {
+      date: "2025-12-31",
+      generatedAt: MOCK_DASHBOARD_STATE.dailyBrief.updatedAt ?? Date.now(),
+      overview: "【今日主线】智能体对战平台走红，OpenAI 暂停训练引发安全讨论。\n\n" +
+        "【关键进展】\n1. TinyAIArena 上线：把智能体对战做成可围观的产品。\n2. 训练暂停：安全与合规压力上桌。\n\n" +
+        "【值得关注】评测方式正在改变。",
+      items: [
+        { title: "Summary one", url: "https://example.com/1", source: "AI Daily", summary: "概括一" },
+        { title: "Summary two", url: "https://example.com/2", source: "Tooling Weekly", summary: "概括二" },
+      ],
+    };
+    renderDashboard(container, {
+      ...MOCK_DASHBOARD_STATE,
+      dailyBrief: { status: "ready", data: brief, updatedAt: brief.generatedAt },
+    }, { status: "刚刚更新", onNewDiary: vi.fn() });
+
+    const card = container.querySelector(".ad-brief");
+    expect(card).not.toBeNull();
+    // 标签与覆盖条数改由页签和标题行承担,卡片里不再重复写一遍「今日摘要」。
+    const newsPanel = card?.parentElement?.parentElement ?? null;
+    expect(newsPanel?.className).toBe("ad-news");
+    expect(newsPanel?.querySelector('[role="tab"][data-news-view="brief"]')?.textContent).toContain("摘要");
+    expect(newsPanel?.querySelector(".ad-panel-toolbar > span")?.textContent).toContain("2 条 · 2025-12-31");
+    // Every 【…】 heading occupies its own line, even when the model glued it to its body.
+    const sectionTitles = Array.from(card?.querySelectorAll(".ad-brief__section-title") ?? [])
+      .map((element) => element.textContent);
+    expect(sectionTitles).toEqual(["【今日主线】", "【关键进展】", "【值得关注】"]);
+    const paragraphs = Array.from(card?.querySelectorAll(".ad-brief__paragraph") ?? []);
+    expect(paragraphs).toHaveLength(3);
+    expect(paragraphs[0]?.textContent).toBe("智能体对战平台走红，OpenAI 暂停训练引发安全讨论。");
+    // Line breaks inside a block survive, so numbered items keep their own rows.
+    expect(paragraphs[1]?.textContent).toContain("1. TinyAIArena 上线：把智能体对战做成可围观的产品。\n2. 训练暂停");
+    expect(paragraphs[2]?.textContent).toBe("评测方式正在改变。");
+    // No per-item rows in the card: those belong to the news list below (no duplication).
+    expect(card?.querySelectorAll("li")).toHaveLength(0);
+    expect(card?.textContent).not.toContain("概括一");
+    // 摘要与新闻列表各占一个页签:摘要在自己那一栏里,列表在另一栏,不再上下堆叠。
+    const briefPane = card?.parentElement ?? null;
+    expect(briefPane?.className).toBe("ad-news__pane");
+    expect(briefPane?.querySelector(".ad-news__list")).toBeNull();
+    expect((newsPanel?.querySelector('[data-news-pane="list"] .ad-news__list') ?? null) !== null).toBe(true);
+  });
+
+  it("keeps headings on their own line for the fallback shapes a model may emit", () => {
+    const cases = [
+      {
+        overview: "## 今日主线\n正文甲。\n\n**关键进展**\n1. 乙。\n\n今日要闻：\n丙。",
+        titles: ["今日主线", "关键进展", "今日要闻："],
+        bodies: ["正文甲。", "1. 乙。", "丙。"],
+      },
+      {
+        overview: "没有任何标记的一段。\n\n第二段。",
+        titles: [],
+        bodies: ["没有任何标记的一段。", "第二段。"],
+      },
+    ];
+    for (const testCase of cases) {
+      const container = document.createElement("div");
+      const generatedAt = Date.now();
+      renderDashboard(container, {
+        ...MOCK_DASHBOARD_STATE,
+        dailyBrief: {
+          status: "ready",
+          updatedAt: generatedAt,
+          data: {
+            date: "2025-12-31",
+            generatedAt,
+            overview: testCase.overview,
+            items: [{ title: "T", url: "https://example.com/1", source: "S", summary: "s" }],
+          },
+        },
+      }, { status: "test", onNewDiary: vi.fn() });
+
+      const card = container.querySelector(".ad-brief");
+      const titles = Array.from(card?.querySelectorAll(".ad-brief__section-title") ?? [])
+        .map((element) => element.textContent);
+      const bodies = Array.from(card?.querySelectorAll(".ad-brief__paragraph") ?? [])
+        .map((element) => element.textContent);
+      expect(titles).toEqual(testCase.titles);
+      expect(bodies).toEqual(testCase.bodies);
+      // Markdown markers must never leak into the rendered card.
+      expect(card?.textContent).not.toContain("##");
+      expect(card?.textContent).not.toContain("*");
+      // A heading-free answer still renders as separate paragraphs, not one block.
+      expect(bodies.every((body) => body !== "")).toBe(true);
+    }
+  });
+  it("resizes the 今天 columns from the divider handle and persists the final width", () => {
+    const container = document.createElement("div");
+    const onTodayNotesWidthChange = vi.fn();
+    renderDashboard(container, MOCK_DASHBOARD_STATE, {
+      status: "刚刚更新",
+      onNewDiary: vi.fn(),
+      todayNotesWidth: 400,
+      onTodayNotesWidthChange,
+    });
+
+    const layout = container.querySelector<HTMLElement>(".ad-today");
+    const handle = container.querySelector<HTMLElement>(".ad-today .ad-splitter");
+    expect(handle).not.toBeNull();
+    expect(handle?.getAttribute("role")).toBe("separator");
+    expect(handle?.getAttribute("aria-orientation")).toBe("vertical");
+    expect(handle?.getAttribute("aria-valuemin")).toBe("240");
+    expect(handle?.tabIndex).toBe(0);
+    // A stored width becomes the notes track; the responsive default stays when unset.
+    expect(layout?.style.getPropertyValue("--ad-notes-track")).toBe("400px");
+
+    handle?.dispatchEvent(pointerEvent("pointerdown", 600));
+    window.dispatchEvent(pointerEvent("pointermove", 560));
+    // Dragging left widens the notes column, and the track follows the pointer live.
+    expect(layout?.style.getPropertyValue("--ad-notes-track")).toBe("440px");
+    window.dispatchEvent(pointerEvent("pointerup", 560));
+    expect(onTodayNotesWidthChange).toHaveBeenCalledWith(440);
+    expect(layout?.classList.contains("ad-split-host--dragging")).toBe(false);
+
+    // Keyboard nudges are committed immediately: ArrowLeft moves the divider left.
+    handle?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowLeft", bubbles: true }));
+    expect(onTodayNotesWidthChange).toHaveBeenLastCalledWith(464);
+    handle?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+    expect(onTodayNotesWidthChange).toHaveBeenLastCalledWith(440);
+    expect(layout?.style.getPropertyValue("--ad-notes-track")).toBe("440px");
+  });
+  it("resizes the 今日发现 columns from its own divider and persists that width", () => {
+    const container = document.createElement("div");
+    const onDiscoveryRankingWidthChange = vi.fn();
+    renderDashboard(container, MOCK_DASHBOARD_STATE, {
+      status: "刚刚更新",
+      onNewDiary: vi.fn(),
+      discoveryRankingWidth: 380,
+      onDiscoveryRankingWidthChange,
+    });
+
+    const layout = container.querySelector<HTMLElement>(".ad-discovery");
+    const handle = container.querySelector<HTMLElement>(".ad-discovery .ad-splitter");
+    expect(handle).not.toBeNull();
+    expect(handle?.getAttribute("role")).toBe("separator");
+    expect(handle?.getAttribute("aria-label")).toContain("GitHub");
+    // Each split owns its own track, so the two columns stay independent.
+    expect(layout?.style.getPropertyValue("--ad-ranking-track")).toBe("380px");
+    expect(container.querySelector<HTMLElement>(".ad-today")?.style.getPropertyValue("--ad-notes-track"))
+      .toBe("");
+
+    handle?.dispatchEvent(pointerEvent("pointerdown", 900));
+    window.dispatchEvent(pointerEvent("pointermove", 960));
+    // Dragging right narrows the GitHub column down to its 260px floor.
+    expect(layout?.style.getPropertyValue("--ad-ranking-track")).toBe("320px");
+    window.dispatchEvent(pointerEvent("pointerup", 960));
+    expect(onDiscoveryRankingWidthChange).toHaveBeenCalledWith(320);
+    expect(onDiscoveryRankingWidthChange).toHaveBeenCalledOnce();
+  });
+  it("opens a recent note from its row and disables the row without a handler", () => {
+    const container = document.createElement("div");
+    const onOpenNote = vi.fn();
+    renderDashboard(container, MOCK_DASHBOARD_STATE, {
+      status: "刚刚更新",
+      onNewDiary: vi.fn(),
+      onOpenNote,
+    });
+
+    const rows = Array.from(container.querySelectorAll<HTMLButtonElement>(".ad-note__open"));
+    expect(rows).toHaveLength(MOCK_DASHBOARD_STATE.recentNotes.data.length);
+    expect(rows[0]?.disabled).toBe(false);
+    expect(rows[0]?.getAttribute("aria-label")).toContain("打开笔记");
+    rows[0]?.click();
+    expect(onOpenNote).toHaveBeenCalledWith(MOCK_DASHBOARD_STATE.recentNotes.data[0]);
+    expect(onOpenNote).toHaveBeenCalledOnce();
+
+    const withoutHandler = document.createElement("div");
+    renderDashboard(withoutHandler, MOCK_DASHBOARD_STATE, {
+      status: "刚刚更新",
+      onNewDiary: vi.fn(),
+    });
+    expect(withoutHandler.querySelector<HTMLButtonElement>(".ad-note__open")?.disabled).toBe(true);
+  });
+  it("hides the summary card when the brief is not ready and keeps the retry affordance", () => {
+    const container = document.createElement("div");
+    renderDashboard(container, {
+      ...MOCK_DASHBOARD_STATE,
+      dailyBrief: { status: "error", data: null, message: "今日摘要生成失败（原因：HTTP 401）" },
+    }, { status: "部分资讯暂不可用", onNewDiary: vi.fn(), onRetry: vi.fn() });
+
+    expect(container.querySelector(".ad-brief")).toBeNull();
+    // The retry path renders the generic issue line; my custom message is covered
+    // by the FeedService contract, the panel only guarantees the retry affordance.
+    expect(container.textContent).toContain("今日摘要尚未生成");
+    expect(Array.from(container.querySelectorAll("button"))
+      .some((button) => button.textContent === "重试摘要")).toBe(true);
   });
 
   it("puts AI news left of rankings and switches daily and weekly lists", () => {
@@ -364,16 +574,16 @@ describe("renderDashboard", () => {
     expect(scroller?.querySelector(".ad-heatmap__months")).not.toBeNull();
   });
 
-  it("groups today's and earlier incomplete tasks with labels", () => {
+  it("groups tasks by source note, today first, and labels each group with its day", () => {
     const container = document.createElement("div");
+    const today = localDateKey(new Date());
     const state = JSON.parse(JSON.stringify(MOCK_DASHBOARD_STATE)) as typeof MOCK_DASHBOARD_STATE;
-    // Two tasks: one from today, one from an earlier date, one completed.
     state.tasks = {
       status: "ready",
       data: [
-        { id: "a:0", path: "a.md", line: 0, text: "Today task", completed: false, date: "2026-08-01" },
-        { id: "b:0", path: "b.md", line: 0, text: "Earlier task", completed: false, date: "2026-07-31" },
-        { id: "c:0", path: "c.md", line: 0, text: "Done task", completed: true, date: "2026-07-30" },
+        { id: "a:0", path: "Plans/2026-07-31-plan.md", line: 0, text: "Old step", completed: false, date: "2026-07-31" },
+        { id: "b:0", path: "Daily/today.md", line: 0, text: "Today task", completed: false, date: today },
+        { id: "c:0", path: "Inbox/scratch.md", line: 0, text: "Undated task", completed: false },
       ],
       updatedAt: Date.now(),
     };
@@ -381,12 +591,110 @@ describe("renderDashboard", () => {
       status: "test",
       onNewDiary: vi.fn(),
     });
-    expect(container.textContent).toContain("本日待办");
-    expect(container.textContent).toContain("之前未完成");
-    expect(container.textContent).toContain("Today task");
-    expect(container.textContent).toContain("Earlier task");
-    // Completed tasks are hidden from the task list.
-    expect(container.textContent).not.toContain("Done task");
+
+    const groups = Array.from(container.querySelectorAll(".ad-task-group"));
+    expect(
+      groups.map((group) => group.querySelector(".ad-task-group__title")?.textContent),
+    ).toEqual(["today", "2026-07-31-plan", "scratch"]);
+    expect(container.querySelector(".ad-task-group__badge")?.textContent).toBe("今日");
+    expect(container.textContent).toContain("无日期 · 1 项");
+    expect(container.textContent).toContain(`${today} · 1 项`);
+  });
+
+  it("keeps completed tasks in the DOM behind a purely local reveal toggle", () => {
+    const container = document.createElement("div");
+    const onToggleTask = vi.fn();
+    const state = JSON.parse(JSON.stringify(MOCK_DASHBOARD_STATE)) as typeof MOCK_DASHBOARD_STATE;
+    state.tasks = {
+      status: "ready",
+      data: [
+        { id: "a:0", path: "Today.md", line: 0, text: "Open task", completed: false },
+        { id: "a:1", path: "Today.md", line: 1, text: "Done task", completed: true },
+      ],
+      updatedAt: Date.now(),
+    };
+    renderDashboard(container, state, {
+      status: "test",
+      onNewDiary: vi.fn(),
+      onToggleTask,
+    });
+
+    const list = container.querySelector(".ad-task-list");
+    // The stylesheet hides completed rows; the contract here is the reveal class.
+    expect(list?.classList).not.toContain("ad-task-list--show-completed");
+    expect(container.querySelectorAll('.ad-task[data-completed="true"]')).toHaveLength(1);
+    expect(container.textContent).toContain("1 项未完成");
+
+    const toggle = Array.from(container.querySelectorAll("button"))
+      .find((button) => button.textContent === "显示已完成（1）");
+    expect(toggle?.getAttribute("aria-pressed")).toBe("false");
+    toggle?.click();
+    expect(list?.classList).toContain("ad-task-list--show-completed");
+    expect(toggle?.getAttribute("aria-pressed")).toBe("true");
+    expect(onToggleTask).not.toHaveBeenCalled();
+  });
+
+  it("keeps the local reveal choice and collapsed groups across a re-render", () => {
+    const container = document.createElement("div");
+    const state = JSON.parse(JSON.stringify(MOCK_DASHBOARD_STATE)) as typeof MOCK_DASHBOARD_STATE;
+    state.tasks = {
+      status: "ready",
+      data: [
+        { id: "a:0", path: "Today.md", line: 0, text: "Open task", completed: false },
+        { id: "a:1", path: "Today.md", line: 1, text: "Done task", completed: true },
+        { id: "b:0", path: "Inbox/scratch.md", line: 0, text: "Later", completed: false },
+      ],
+      updatedAt: Date.now(),
+    };
+    const interaction = createTodayInteractionState();
+    const callbacks = { status: "test", onNewDiary: vi.fn(), interaction };
+    const render = (): (() => void) => renderDashboard(container, state, callbacks);
+    const group = (path: string): HTMLDetailsElement | undefined =>
+      Array.from(container.querySelectorAll(".ad-task-group__details"))
+        .find((item) =>
+          item.querySelector(".ad-task-group__meta")?.getAttribute("title") === path) as
+        | HTMLDetailsElement
+        | undefined;
+
+    const first = render();
+    const list = (): Element | null => container.querySelector(".ad-task-list");
+    expect(list()?.classList).not.toContain("ad-task-list--show-completed");
+    const toggle = Array.from(container.querySelectorAll("button"))
+      .find((button) => button.textContent === "显示已完成（1）");
+    toggle?.click();
+    expect(list()?.classList).toContain("ad-task-list--show-completed");
+
+    const collapsed = group("Inbox/scratch.md");
+    expect(collapsed).toBeDefined();
+    if (collapsed !== undefined) {
+      collapsed.open = false;
+      collapsed.dispatchEvent(new Event("toggle"));
+    }
+    expect(interaction.collapsedTaskGroups.has("Inbox/scratch.md")).toBe(true);
+
+    // Every state push rebuilds the panel; the user's local choices must survive it.
+    first();
+    render();
+
+    expect(list()?.classList).toContain("ad-task-list--show-completed");
+    expect(group("Inbox/scratch.md")?.open).toBe(false);
+    expect(group("Today.md")?.open).toBe(true);
+  });
+
+  it("reveals completed rows up front when nothing is left to do", () => {
+    const container = document.createElement("div");
+    const state = JSON.parse(JSON.stringify(MOCK_DASHBOARD_STATE)) as typeof MOCK_DASHBOARD_STATE;
+    state.tasks = {
+      status: "ready",
+      data: [{ id: "a:0", path: "Today.md", line: 0, text: "Done task", completed: true }],
+      updatedAt: Date.now(),
+    };
+    renderDashboard(container, state, { status: "test", onNewDiary: vi.fn() });
+
+    expect(container.querySelector(".ad-task-list")?.classList)
+      .toContain("ad-task-list--show-completed");
+    expect(container.textContent).toContain("0 项未完成");
+    expect(container.textContent).toContain("Done task");
   });
 
   it("renders health categories as rounded completion percentages", () => {

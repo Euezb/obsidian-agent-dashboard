@@ -105,4 +105,50 @@ describe("parseTasks", () => {
       },
     ]);
   });
+
+  it.each([
+    ["- [ ] **Step 1: 新增失败测试**", "Step 1: 新增失败测试"],
+    ["- [ ] 运行 `run_case` 并确认 **红灯**", "运行 run_case 并确认 红灯"],
+    ["- [ ] *重点* 与 ~~删除~~ 与 ==高亮==", "重点 与 删除 与 高亮"],
+    ["- [ ] 参考 [[目标笔记#小节|目标笔记]]", "参考 目标笔记"],
+    ["- [ ] 参考 [[目标笔记#小节]]", "参考 目标笔记"],
+    ["- [ ] 见 [官方文档](https://example.com/docs)", "见 官方文档"],
+    ["- [ ] **发版** 📅 2026-07-01", "发版"],
+  ])("shows %j as plain text", (source, expected) => {
+    expect(parseTasks("Plan.md", source)[0]?.text).toBe(expected);
+  });
+
+  it("keeps due dates while stripping Markdown and leaves math and identifiers alone", () => {
+    const [dated] = parseTasks("Plan.md", "- [ ] **发版** 📅 2026-07-01");
+    expect(dated).toMatchObject({ text: "发版", dueDate: "2026-07-01" });
+
+    const [literal] = parseTasks("Math.md", "- [ ] 计算 2*3*4 与 snake_case_name");
+    expect(literal?.text).toBe("计算 2*3*4 与 snake_case_name");
+
+    const [code] = parseTasks("Code.md", "- [ ] 调用 `a*b*c` 与 `**raw**`");
+    expect(code?.text).toBe("调用 a*b*c 与 **raw**");
+  });
+
+  it("marks tasks that live under an archive heading and stops at the next heading", () => {
+    const markdown = [
+      "## Tasks",
+      "- [x] Today's own work",
+      "## 归档",
+      "- [x] Carried-over work",
+      "- [ ] Unchecked carried-over work",
+      "### Sub-heading inside the archive",
+      "- [x] Still carried over",
+      "## Notes",
+      "- [x] Not carried over",
+    ].join("\n");
+
+    expect(parseTasks("Daily/2026-09-29.md", markdown).map((task) => [task.text, task.archived]))
+      .toEqual([
+        ["Today's own work", undefined],
+        ["Carried-over work", true],
+        ["Unchecked carried-over work", true],
+        ["Still carried over", true],
+        ["Not carried over", undefined],
+      ]);
+  });
 });

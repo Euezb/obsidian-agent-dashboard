@@ -81,18 +81,33 @@ export class CacheRepository {
     const finalPath = this.finalPath(name);
     const backupPath = this.backupPath(name);
 
+    try {
+      return await this.readOnce(name, finalPath, backupPath, guard);
+    } catch (error) {
+      // A concurrent write briefly renames the final entry away (final → backup
+      // → new final). One retry turns that window into a successful read
+      // instead of a visible "cache read failed" error; a genuine IO failure
+      // fails again on the second attempt and is reported exactly as before.
+      try {
+        return await this.readOnce(name, finalPath, backupPath, guard);
+      } catch {
+        throw error;
+      }
+    }
+  }
+
+  private async readOnce<T>(
+    name: string,
+    finalPath: string,
+    backupPath: string,
+    guard: DataGuard<T>,
+  ): Promise<CacheReadResult<T>> {
     if (!await this.storage.exists(finalPath)) {
       if (!await this.storage.exists(backupPath)) return { status: "missing" };
       try {
         await this.storage.rename(backupPath, finalPath);
       } catch (error) {
         if (!await this.storage.exists(finalPath)) throw error;
-      }
-    } else if (this.storage.remove !== undefined && await this.storage.exists(backupPath)) {
-      try {
-        await this.storage.remove(backupPath);
-      } catch {
-        // A valid final always wins; stale backup cleanup is best-effort.
       }
     }
     const content = await this.storage.read(finalPath);
@@ -105,6 +120,15 @@ export class CacheRepository {
 
     const now = this.now();
     if (!isValidCacheEnvelope(parsed, guard, now)) return this.quarantine(finalPath, name);
+    // 校验通过之后才清 backup：删早了的话，final 一旦损坏，唯一的好副本就没了。
+    // final 真的损坏时 quarantine 会移走它，下一次读取由上面的 backup 分支恢复。
+    if (this.storage.remove !== undefined && await this.storage.exists(backupPath)) {
+      try {
+        await this.storage.remove(backupPath);
+      } catch {
+        // A valid final always wins; stale backup cleanup is best-effort.
+      }
+    }
     const envelope = parsed;
     const ttlMs = this.currentTtl();
     const status = now - envelope.generatedAt <= ttlMs ? "fresh" : "stale";

@@ -3,6 +3,12 @@ import type { LocalDashboardData } from "../features/vault/VaultScanner";
 
 export interface LocalDashboardControllerOptions {
   scan: () => Promise<LocalDashboardData>;
+  /**
+   * Scan for file-change refreshes: it must start after the change, never reuse
+   * a scan that was already running when the file event arrived. Falls back to
+   * `scan` when the caller has no freshness-preserving variant.
+   */
+  scanAfterChange?: () => Promise<LocalDashboardData>;
   toggleTask: (task: DashboardTask) => Promise<void>;
   onReady: (data: LocalDashboardData, updatedAt: number) => void;
   onScanError: () => void;
@@ -22,7 +28,7 @@ export class LocalDashboardController {
   open(): Promise<void> {
     this.isOpen = true;
     this.openGeneration += 1;
-    return this.refresh();
+    return this.request(this.options.scan);
   }
 
   close(): void {
@@ -32,9 +38,13 @@ export class LocalDashboardController {
   }
 
   refresh(): Promise<void> {
+    return this.request(this.options.scanAfterChange ?? this.options.scan);
+  }
+
+  private request(scan: () => Promise<LocalDashboardData>): Promise<void> {
     const generation = this.openGeneration;
     const revision = ++this.requestRevision;
-    const operation = this.runScan(generation, revision);
+    const operation = this.runScan(generation, revision, scan);
     this.activeScans.add(operation);
     void operation.then(
       () => this.activeScans.delete(operation),
@@ -43,9 +53,13 @@ export class LocalDashboardController {
     return operation;
   }
 
-  private async runScan(generation: number, revision: number): Promise<void> {
+  private async runScan(
+    generation: number,
+    revision: number,
+    scan: () => Promise<LocalDashboardData>,
+  ): Promise<void> {
     try {
-      const data = await this.options.scan();
+      const data = await scan();
       if (!this.isCurrent(generation, revision)) return;
       this.options.onReady(data, this.options.now());
     } catch {

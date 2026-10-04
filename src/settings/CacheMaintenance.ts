@@ -1,7 +1,7 @@
 import { lstat, readFile, readdir, rename, unlink } from "node:fs/promises";
 import { fsPath } from "../infrastructure/fsPath";
 import type { DataGuard } from "../domain/cacheSchemas";
-import { NodeRunnerFilePort, type RunnerPathExpectation } from "../features/codex/CodexRunner";
+import { NodeRunnerFilePort, type RunnerPathExpectation } from "../infrastructure/safeFilePort";
 import {
   FEED_CACHE_NAMES,
   isDailyBrief,
@@ -86,13 +86,14 @@ export class CacheMaintenance {
   async regenerate(): Promise<number> {
     const context = await this.openCacheFolder();
     if (context === null) return 0;
-    const allowed = new Set(Object.keys(CACHE_GUARDS).flatMap((name) => [
-      fsPath.join(context.root, `${name}.json`),
-      fsPath.join(context.root, `${name}.backup.json`),
-    ]));
+    const prefixes = Object.keys(CACHE_GUARDS).map((name) => `${name}.`);
     let removed = 0;
     for (const file of context.entries) {
-      if (!allowed.has(file)) continue;
+      // An allowlisted cache and every artifact it produces: the entry itself,
+      // its transactional backup, quarantined copies, and interrupted writes.
+      // Nothing else in the folder is ever touched.
+      const basename = fsPath.basename(file);
+      if (!prefixes.some((prefix) => basename.startsWith(prefix))) continue;
       await this.files.assertSafePath(this.vaultRoot, file, "existing-file");
       await this.files.remove(file);
       await this.files.assertSafePath(this.vaultRoot, file, "new-file");

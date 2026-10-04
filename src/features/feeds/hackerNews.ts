@@ -1,5 +1,5 @@
 import type { NewsItem } from "../../domain/types";
-import type { RequestPort, RequestResult } from "./githubTrending";
+import type { RequestPort, RequestResult } from "../../infrastructure/requestPort";
 
 const API_ORIGIN = "https://hacker-news.firebaseio.com/v0";
 const DISCUSSION_ORIGIN = "https://news.ycombinator.com/item";
@@ -12,7 +12,8 @@ const AI_TERMS = [
   /(?<![\p{L}\p{M}\p{N}])ai(?![\p{L}\p{M}\p{N}])/iu,
   /(?<![\p{L}\p{M}\p{N}])agents?(?![\p{L}\p{M}\p{N}])/iu,
   /(?<![\p{L}\p{M}\p{N}])llm(?![\p{L}\p{M}\p{N}])/iu,
-  /(?<![\p{L}\p{M}\p{N}])model(?![\p{L}\p{M}\p{N}])/iu,
+  // 单独的 "model" 不再算 AI：它会把 "Model T restoration" 这类标题也放进来。
+  // 真要讲模型，标题里几乎必然同时出现 ai/llm/openai 等词，那些词条会命中。
   /(?<![\p{L}\p{M}\p{N}])openai(?![\p{L}\p{M}\p{N}])/iu,
   /(?<![\p{L}\p{M}\p{N}])anthropic(?![\p{L}\p{M}\p{N}])/iu,
   /(?<![\p{L}\p{M}\p{N}])mcp(?![\p{L}\p{M}\p{N}])/iu,
@@ -110,8 +111,11 @@ const mapWithConcurrency = async <T, R>(
 
 const parseTopIds = (value: unknown): number[] | undefined => {
   if (!Array.isArray(value)) return undefined;
-  const ids: unknown[] = value.slice(0, MAX_STORY_IDS) as unknown[];
-  if (!ids.every((id): id is number => typeof id === "number" && Number.isSafeInteger(id) && id > 0)) return undefined;
+  // 逐条过滤而不是 every：一个坏 id 不该让整个 top 榜单消失。
+  const ids = (value.slice(0, MAX_STORY_IDS) as unknown[])
+    .filter((id): id is number => typeof id === "number" && Number.isSafeInteger(id) && id > 0);
+  // 一个合规 id 都没有仍按失败处理，免得上游把空榜单当成一次成功抓取。
+  if (ids.length === 0) return undefined;
   return [...new Set(ids)];
 };
 

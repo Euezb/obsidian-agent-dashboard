@@ -47,6 +47,7 @@ describe("applyExternalSnapshot", () => {
         data: {
           date: "2026-06-29",
           generatedAt: new Date(2026, 5, 29, 12).getTime(),
+          overview: "今日综述",
           items: [{
             title: "Brief item",
             url: "https://example.com/brief",
@@ -93,6 +94,7 @@ describe("applyExternalSnapshot", () => {
         data: {
           date: "2026-06-29",
           generatedAt: new Date(2026, 5, 28, 23).getTime(),
+          overview: "昨日综述",
           items: [{ title: "Brief", url: "https://example.com/brief", source: "Brief", summary: "Summary" }],
         },
       },

@@ -15,6 +15,9 @@ main.js
 # Exclude sourcemaps
 *.map
 
+# 塔罗素材的下载缓存(work/build-tarot-assets.ps1);成品在 assets/tarot/
+work/tarot-720/
+
 # obsidian
 data.json
 

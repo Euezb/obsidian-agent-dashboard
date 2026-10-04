@@ -63,6 +63,35 @@ describe("LocalDashboardController", () => {
     expect(onReady).toHaveBeenCalledWith(data("new"), 1);
   });
 
+  it("re-scans after a file change instead of reusing the scan that is already running", async () => {
+    const running = deferred<LocalDashboardData>();
+    const afterChange = deferred<LocalDashboardData>();
+    const scan = vi.fn(() => running.promise);
+    const scanAfterChange = vi.fn(() => afterChange.promise);
+    const onReady = vi.fn();
+    const controller = new LocalDashboardController({
+      scan,
+      scanAfterChange,
+      toggleTask: vi.fn(),
+      onReady,
+      onScanError: vi.fn(),
+      onToggleError: vi.fn(),
+      now: () => 1,
+    });
+
+    const opening = controller.open();
+    const refreshing = controller.refresh();
+    afterChange.resolve(data("new"));
+    await refreshing;
+    running.resolve(data("old"));
+    await opening;
+
+    expect(scan).toHaveBeenCalledOnce();
+    expect(scanAfterChange).toHaveBeenCalledOnce();
+    expect(onReady).toHaveBeenCalledOnce();
+    expect(onReady).toHaveBeenCalledWith(data("new"), 1);
+  });
+
   it("ignores a scan result arriving after close", async () => {
     const pending = deferred<LocalDashboardData>();
     const onReady = vi.fn();

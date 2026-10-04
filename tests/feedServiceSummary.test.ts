@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import type { DailyBrief, NewsItem, TrendingRepo } from "../src/domain/types";
 import type { ExternalDashboardState } from "../src/features/feeds/FeedService";
-import { FeedService } from "../src/features/feeds/FeedService";
+import { FeedService, MAX_AUTO_SUMMARY_ATTEMPTS } from "../src/features/feeds/FeedService";
+import { CACHE_SCHEMA_VERSION } from "../src/constants";
 import { CacheRepository, type CacheStoragePort } from "../src/infrastructure/CacheRepository";
 import { RefreshCoordinator } from "../src/infrastructure/RefreshCoordinator";
 
@@ -39,20 +40,25 @@ function setup(options: {
   attempt?: string;
   fail?: boolean;
   noSource?: boolean;
+  newsFails?: boolean;
   cacheWriteFail?: boolean;
   briefPromise?: Promise<DailyBrief>;
+  storage?: MemoryStorage;
 } = {}) {
   let now = options.now ?? new Date(2026, 5, 29, 9).getTime();
   let attempt = options.attempt;
   const events: string[] = [];
-  const storage = new MemoryStorage();
+  const storage = options.storage ?? new MemoryStorage();
   storage.failWrite = options.cacheWriteFail ?? false;
   const cache = new CacheRepository(storage, 3_600_000, () => now, "Dashboard/cache", () => "nonce");
+  let serviceRef: FeedService | undefined;
   const runDailyBrief = vi.fn(async (date: string): Promise<DailyBrief> => {
     events.push("summary");
     if (options.fail) throw new Error("quota exceeded: secret detail");
+    // Mirrors the real wiring: the summarizer reads the news this service already holds.
+    await serviceRef?.latestNews();
     if (options.briefPromise !== undefined) return options.briefPromise;
-    return { date, generatedAt: now, items: [{
+    return { date, generatedAt: now, overview: "综述", items: [{
       title: "摘要", url: news.url, source: news.source, summary: "中文总结",
     }] };
   });
@@ -60,7 +66,11 @@ function setup(options: {
   const service = new FeedService(
     cache, new RefreshCoordinator(),
     { fetch: async () => [repo] },
-    { fetch: async () => { events.push("source"); return options.noSource ? [] : [news]; } },
+    { fetch: async () => {
+      events.push("source");
+      if (options.newsFails) throw new Error("hacker news offline");
+      return options.noSource ? [] : [news];
+    } },
     async () => [], () => [], () => now,
     {
       runner: { runDailyBrief },
@@ -68,30 +78,46 @@ function setup(options: {
       autoSummaryEnabled: () => options.auto ?? true,
     },
   );
-  return { service, runDailyBrief, mark, events, setNow: (value: number) => { now = value; } };
+  serviceRef = service;
+  return { service, runDailyBrief, mark, events, storage, setNow: (value: number) => { now = value; } };
 }
 
-describe("FeedService daily Codex gating", () => {
-  it("refreshes source news, marks first, then runs at most once on two opens", async () => {
+describe("FeedService daily summary gating", () => {
+  it("refreshes source news, runs the summary, then records the day on two opens", async () => {
     const context = setup();
     const snapshots: ExternalDashboardState[] = [];
     await context.service.open((state) => snapshots.push(state));
     await context.service.open((state) => snapshots.push(state));
-    expect(context.events.slice(0, 3)).toEqual(["source", "mark", "summary"]);
+    expect(context.events).toEqual(["source", "summary", "mark"]);
     expect(context.runDailyBrief).toHaveBeenCalledOnce();
+    expect(context.mark).toHaveBeenCalledWith("2026-06-29");
     expect(snapshots.at(-1)?.dailyBrief).toMatchObject({ status: "ready", data: { date: "2026-06-29" } });
   });
 
-  it("persists a failed attempt and does not expose process details or retry that day", async () => {
+  it("keeps a failed summary retryable and never records the day as done", async () => {
     const context = setup({ fail: true });
-    const snapshots: ExternalDashboardState[] = [];
-    await context.service.open((state) => snapshots.push(state));
-    await context.service.open((state) => snapshots.push(state));
-    expect(context.runDailyBrief).toHaveBeenCalledOnce();
-    expect(snapshots.at(-1)?.dailyBrief).toEqual({
-      status: "error", data: null, message: "今日摘要尚未生成",
-    });
-    expect(JSON.stringify(snapshots)).not.toContain("quota");
+    const first: ExternalDashboardState[] = [];
+    await context.service.open((state) => first.push(state));
+    const failed = first.at(-1)?.dailyBrief;
+    expect(failed?.status).toBe("error");
+    expect(failed?.message).toContain("今日摘要生成失败");
+    expect(failed?.message).toContain("quota exceeded");
+    expect(JSON.stringify(first)).not.toContain("secret");
+    expect(context.mark).not.toHaveBeenCalled();
+
+    const second: ExternalDashboardState[] = [];
+    await context.service.open((state) => second.push(state));
+    expect(context.runDailyBrief).toHaveBeenCalledTimes(2);
+    expect(second.at(-1)?.dailyBrief?.status).toBe("error");
+  });
+
+  it("stops automatic attempts after the session's daily retry budget", async () => {
+    const context = setup({ fail: true });
+    for (let open = 0; open < MAX_AUTO_SUMMARY_ATTEMPTS + 3; open += 1) {
+      await context.service.open(() => undefined);
+    }
+    expect(context.runDailyBrief).toHaveBeenCalledTimes(MAX_AUTO_SUMMARY_ATTEMPTS);
+    expect(context.mark).not.toHaveBeenCalled();
   });
 
   it("allows one new attempt on the next local calendar day", async () => {
@@ -111,19 +137,108 @@ describe("FeedService daily Codex gating", () => {
     expect(empty.runDailyBrief).not.toHaveBeenCalled();
   });
 
-  it("does not mark or run when fresh source headlines cannot be cached", async () => {
+  it("still summarizes today's usable headlines when the news cache write fails", async () => {
     const context = setup({ cacheWriteFail: true });
     const snapshots: ExternalDashboardState[] = [];
 
     await context.service.open((state) => snapshots.push(state));
 
-    expect(context.mark).not.toHaveBeenCalled();
-    expect(context.runDailyBrief).not.toHaveBeenCalled();
+    expect(context.runDailyBrief).toHaveBeenCalledOnce();
+    expect(context.mark).toHaveBeenCalledWith("2026-06-29");
+    expect(context.events.filter((event) => event === "source")).toHaveLength(1);
     expect(snapshots.at(-1)?.aiNews).toMatchObject({
       status: "error",
       data: [news],
-      message: "资讯已更新，但缓存写入失败；今日摘要未生成。",
+      message: "资讯已更新，但缓存写入失败。",
     });
+  });
+
+  it("never presents yesterday's headlines as today's summary", async () => {
+    const yesterday = new Date(2026, 5, 29, 9).getTime();
+    const storage = new MemoryStorage();
+    const seeder = new CacheRepository(
+      storage, 3_600_000, () => yesterday, "Dashboard/cache", () => "seed",
+    );
+    await seeder.write("ai-news-sources", {
+      schemaVersion: CACHE_SCHEMA_VERSION,
+      generatedAt: yesterday,
+      source: "hacker-news+rss",
+      data: [news],
+    });
+    const context = setup({ newsFails: true, storage, now: new Date(2026, 5, 30, 9).getTime() });
+    const snapshots: ExternalDashboardState[] = [];
+
+    await context.service.open((state) => snapshots.push(state));
+
+    expect(context.runDailyBrief).not.toHaveBeenCalled();
+    expect(context.mark).not.toHaveBeenCalled();
+    expect(snapshots.at(-1)?.aiNews).toMatchObject({ status: "stale", data: [news] });
+    expect(snapshots.at(-1)?.dailyBrief).toMatchObject({ status: "idle", data: null });
+  });
+
+  it("summarizes today's cached headlines when the refresh fails", async () => {
+    const earlierToday = new Date(2026, 5, 29, 6).getTime();
+    const storage = new MemoryStorage();
+    const seeder = new CacheRepository(
+      storage, 3_600_000, () => earlierToday, "Dashboard/cache", () => "seed-today",
+    );
+    await seeder.write("ai-news-sources", {
+      schemaVersion: CACHE_SCHEMA_VERSION,
+      generatedAt: earlierToday,
+      source: "hacker-news+rss",
+      data: [news],
+    });
+    const context = setup({ newsFails: true, storage });
+    const snapshots: ExternalDashboardState[] = [];
+
+    await context.service.open((state) => snapshots.push(state));
+
+    expect(context.runDailyBrief).toHaveBeenCalledOnce();
+    expect(context.mark).toHaveBeenCalledWith("2026-06-29");
+    expect(snapshots.at(-1)?.aiNews).toMatchObject({
+      status: "stale",
+      data: [news],
+      updatedAt: earlierToday,
+    });
+  });
+
+  it("generates the summary from the headlines the panel already holds, without a second crawl", async () => {
+    const context = setup();
+    await context.service.open(() => undefined);
+    expect(context.events.filter((event) => event === "source")).toHaveLength(1);
+
+    await expect(context.service.latestNews()).resolves.toEqual([news]);
+
+    expect(context.events.filter((event) => event === "source")).toHaveLength(1);
+  });
+
+  it("falls back to the persisted news cache before crawling the network again", async () => {
+    const seeded = setup();
+    await seeded.service.open(() => undefined);
+    const reopened = setup({ storage: seeded.storage });
+
+    await expect(reopened.service.latestNews()).resolves.toEqual([news]);
+
+    expect(reopened.events.filter((event) => event === "source")).toHaveLength(0);
+  });
+
+  it("crawls the network only when no headlines are available at all", async () => {
+    const context = setup();
+
+    await expect(context.service.latestNews()).resolves.toEqual([news]);
+
+    expect(context.events.filter((event) => event === "source")).toHaveLength(1);
+  });
+
+  it("runs today's summary right after a manual news retry succeeds", async () => {
+    const context = setup();
+    const snapshots: ExternalDashboardState[] = [];
+
+    await context.service.retry("aiNews", (state) => snapshots.push(state));
+
+    expect(context.runDailyBrief).toHaveBeenCalledOnce();
+    expect(context.mark).toHaveBeenCalledWith("2026-06-29");
+    expect(snapshots.at(-1)?.dailyBrief).toMatchObject({ status: "ready", data: { date: "2026-06-29" } });
   });
 
   it("publishes a loading daily brief while the Codex summary is running", async () => {
@@ -139,7 +254,7 @@ describe("FeedService daily Codex gating", () => {
       data: null,
       message: "正在生成今日摘要",
     });
-    release({ date: "2026-06-29", generatedAt: new Date(2026, 5, 29, 9).getTime(), items: [{
+    release({ date: "2026-06-29", generatedAt: new Date(2026, 5, 29, 9).getTime(), overview: "综述", items: [{
       title: "摘要", url: news.url, source: news.source, summary: "中文总结",
     }] });
     await opening;
@@ -199,7 +314,7 @@ describe("FeedService daily Codex gating", () => {
     expect(reopenedSnapshots.at(-1)?.dailyBrief.status).toBe("loading");
     expect(reopenedSettled).toBe(false);
 
-    release({ date: "2026-06-29", generatedAt: now, items: [{
+    release({ date: "2026-06-29", generatedAt: now, overview: "综述", items: [{
       title: "摘要", url: news.url, source: news.source, summary: "中文总结",
     }] });
     await Promise.all([firstOpen, reopened]);
@@ -221,7 +336,7 @@ describe("FeedService daily Codex gating", () => {
     const marks: string[] = [];
     const runDailyBrief = vi.fn(async (date: string): Promise<DailyBrief> => {
       if (date === "2026-06-29") return yesterdayPending;
-      return { date, generatedAt: now, items: [{
+      return { date, generatedAt: now, overview: "综述", items: [{
         title: "今日摘要", url: news.url, source: news.source, summary: "今日中文总结",
       }] };
     });
@@ -252,6 +367,7 @@ describe("FeedService daily Codex gating", () => {
     releaseYesterday({
       date: "2026-06-29",
       generatedAt: new Date(2026, 5, 29, 23, 59).getTime(),
+      overview: "昨日综述",
       items: [{ title: "昨日摘要", url: news.url, source: news.source, summary: "昨日中文总结" }],
     });
 
@@ -282,6 +398,7 @@ describe("FeedService daily Codex gating", () => {
     const runDailyBrief = vi.fn(async (date: string): Promise<DailyBrief> => ({
       date,
       generatedAt: now,
+      overview: "综述",
       items: [{ title: "今日摘要", url: news.url, source: news.source, summary: "中文总结" }],
     }));
     const storage = new MemoryStorage();

@@ -1,5 +1,5 @@
 import type { NewsItem } from "../../domain/types";
-import type { RequestPort } from "./githubTrending";
+import type { RequestPort } from "../../infrastructure/requestPort";
 
 const EPOCH_ISO = new Date(0).toISOString();
 const MAX_RESULTS = 20;

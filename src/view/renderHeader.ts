@@ -1,9 +1,13 @@
+import type { AlmanacCard } from "../features/divination/almanacCard";
+import { createAlmanacCard } from "./renderAlmanacCard";
 import { createElement } from "./domHelpers";
 
 export interface HeaderRenderOptions {
   updatedAt?: number;
   status: string;
   onNewDiary: () => void;
+  /** 头部黄历卡数据;缺省或 null 时不渲染卡片。 */
+  almanac?: AlmanacCard | null;
 }
 
 function formatUpdatedAt(updatedAt?: number): string {
@@ -23,6 +27,7 @@ export function renderHeader(
   updatedAt: number | undefined,
   status: string,
   onNewDiary: () => void,
+  almanac?: AlmanacCard | null,
 ): () => void {
   container.replaceChildren();
   container.className = "ad-header";
@@ -63,7 +68,9 @@ export function renderHeader(
   diaryButton.addEventListener("click", onNewDiary);
 
   actions.append(updateStatus, diaryButton);
-  container.append(identity, actions);
+  const almanacCard = almanac == null ? null : createAlmanacCard(container.ownerDocument, almanac);
+  if (almanacCard !== null) container.append(identity, almanacCard, actions);
+  else container.append(identity, actions);
 
   return () => {
     diaryButton.removeEventListener("click", onNewDiary);

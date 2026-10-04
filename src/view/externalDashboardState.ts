@@ -1,5 +1,6 @@
 import type { DashboardState, ModuleState, NewsItem } from "../domain/types";
 import type { ExternalDashboardState } from "../features/feeds/FeedService";
+import { localCalendarDate } from "../domain/localDate";
 
 export function applyExternalSnapshot(
   state: DashboardState,
@@ -68,10 +69,6 @@ function visibleNews(external: ExternalDashboardState, now: number): ModuleState
   };
 }
 
-export function localCalendarDate(timestamp: number): string {
-  const date = new Date(timestamp);
-  const year = String(date.getFullYear()).padStart(4, "0");
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
-}
+// 日期键的唯一实现在 domain/localDate（审查 D6）；这里转出一次，
+// 既有引用路径保持有效。
+export { localCalendarDate };

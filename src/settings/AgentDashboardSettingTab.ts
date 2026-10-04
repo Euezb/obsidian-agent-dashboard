@@ -1,8 +1,9 @@
 /* eslint-disable obsidianmd/ui/sentence-case -- Chinese UI preserves product names and standard acronyms. */
 import { Modal, Notice, PluginSettingTab, Setting } from "obsidian";
-import type { App, TextComponent } from "obsidian";
+import type { App } from "obsidian";
 import type AgentDashboardPlugin from "../main";
 import type { AgentDashboardSettings } from "./settings";
+import { cloneSettingValue } from "../infrastructure/cloneSettingValue";
 import { runConfirmed } from "./CacheMaintenance";
 import { SafeActionQueue, SafeButtonActionRunner } from "./SafeActionQueue";
 import {
@@ -10,14 +11,17 @@ import {
   type SettingValueControl,
 } from "./SettingControlPersistence";
 import {
-  normalizeCodexExecutableInput,
+  missingVaultFolders,
+  normalizeApiSummarizer,
   normalizeGithubSecretName,
   normalizeTtlMinutes,
   normalizeVaultRelativeFolder,
   parseRssFeedLines,
+  parseVaultFolderLines,
 } from "./settingsValidation";
 
 type FolderKey = "dailyFolder" | "inboxFolder" | "reportsFolder" | "cacheFolder";
+type FolderListKey = "taskIncludeFolders" | "taskExcludeFolders";
 
 const RECOMMENDED_RSS_FEEDS: ReadonlyArray<readonly [string, string]> = [
   ["HuggingFace Papers", "https://huggingface.co/papers/rss"],
@@ -42,8 +46,8 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
     new Setting(containerEl).setName("文件与缓存").setHeading();
     this.addFolderSetting("日记文件夹", "新建日记的 Vault 相对路径。", "dailyFolder");
     this.addFolderSetting("收件箱文件夹", "用于健康度计算的收件箱路径。", "inboxFolder");
-    this.addFolderSetting("报告文件夹", "Codex 研究报告的保存路径。", "reportsFolder");
-    this.addFolderSetting("缓存文件夹", "Codex 工作文件（资讯源、提示词）的 Vault 相对路径；榜单与摘要缓存保存在插件数据目录，不占用同步空间。修改后请重启 Obsidian。", "cacheFolder");
+    this.addFolderSetting("报告文件夹", "深度研究报告与 Vault 体检报告的保存路径。", "reportsFolder");
+    this.addFolderSetting("缓存文件夹", "插件工作文件的 Vault 相对路径；榜单与摘要缓存保存在插件数据目录，不占用同步空间。修改后请重启 Obsidian。", "cacheFolder");
 
     new Setting(containerEl)
       .setName("缓存有效期")
@@ -61,6 +65,18 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
           void this.commitControl(text, "externalCacheTtlMinutes", ttl, String);
         });
       });
+
+    new Setting(containerEl).setName("待办来源").setHeading();
+    this.addFolderListSetting(
+      "任务来源文件夹",
+      "每行一个 Vault 相对路径；留空表示扫描全库。填写后只收集这些文件夹里的复选框，其它笔记的待办不会出现在面板里。修改后立即重扫。",
+      "taskIncludeFolders",
+    );
+    this.addFolderListSetting(
+      "任务排除文件夹",
+      "每行一个 Vault 相对路径；这些文件夹里的复选框永远不会进入待办列表，优先级高于来源文件夹。",
+      "taskExcludeFolders",
+    );
 
     new Setting(containerEl).setName("资讯来源").setHeading();
     new Setting(containerEl)
@@ -83,64 +99,131 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
     for (const [label, url] of RECOMMENDED_RSS_FEEDS) {
       recommended.addButton((button) => {
         button.setButtonText(label).onClick(() => {
-          const current = this.dashboardPlugin.settings.rssFeeds;
-          if (current.includes(url)) {
-            new Notice(`${label} 已在订阅列表中`);
-            return;
-          }
-          void this.dashboardPlugin.updateSetting("rssFeeds", [...current, url]).then(() => {
+          // 读当前订阅、判重、写入必须一起排进串行队列：连点两个按钮时，
+          // 第二次点击若在第一次落盘前读到旧数组，先加的那个源会被整个覆盖掉。
+          void this.saveActions.run(async () => {
+            const current = this.dashboardPlugin.settings.rssFeeds;
+            if (current.includes(url)) {
+              new Notice(`${label} 已在订阅列表中`);
+              return;
+            }
+            await this.dashboardPlugin.updateSetting("rssFeeds", [...current, url]);
             new Notice(`已添加订阅：${label}，重新打开设置可看到更新`);
-          }).catch(() => {
-            new Notice("保存设置失败");
-          });
+          }, () => { new Notice("保存设置失败"); });
         });
       });
     }
 
-    new Setting(containerEl).setName("Codex 摘要").setHeading();
+    new Setting(containerEl).setName("今日摘要").setHeading();
     new Setting(containerEl)
       .setName("自动生成每日摘要")
-      .setDesc("每天首次获得新资讯后自动运行一次 Codex；失败不会在当天反复运行。")
+      .setDesc("每天首次获得新资讯后自动生成一次摘要；失败不会在当天反复自动运行，可在面板手动重试。摘要由下方直连 API 生成。")
       .addToggle((toggle) => {
-        toggle.setValue(this.dashboardPlugin.settings.autoDailyCodexSummary);
+        toggle.setValue(this.dashboardPlugin.settings.autoDailySummary);
         toggle.toggleEl.setAttribute("aria-label", "自动生成每日摘要");
         toggle.onChange((value) => {
-          void this.commitControl(toggle, "autoDailyCodexSummary", value, (enabled) => enabled);
+          void this.commitControl(toggle, "autoDailySummary", value, (enabled) => enabled);
         });
       });
 
-    let codexInput: TextComponent;
+
+    new Setting(containerEl).setName("卜筮").setHeading();
     new Setting(containerEl)
-      .setName("Codex 可执行文件")
-      .setDesc("填写 codex，或填写本机绝对 .exe 路径。不会执行自定义命令。")
-      .addText((text) => {
-        codexInput = text;
-        text.setValue(this.dashboardPlugin.settings.codexExecutable);
-        text.inputEl.setAttribute("aria-label", "Codex 可执行文件路径");
-        text.inputEl.addEventListener("change", () => {
-          const executable = normalizeCodexExecutableInput(text.getValue());
-          if (executable === null) return void new Notice("Codex 路径无效，设置未保存");
-          void this.commitControl(text, "codexExecutable", executable, (value) => value);
-        });
-      })
-      .addButton((button) => {
-        button.setButtonText("检测 Codex");
-        button.buttonEl.setAttribute("aria-label", "检测 Codex 版本");
-        button.onClick(() => {
-          void this.buttonActions.run(button, async () => {
-            const executable = normalizeCodexExecutableInput(codexInput.getValue());
-            if (executable === null) return void new Notice("Codex 路径无效");
-            if (!await this.commitControl(
-              codexInput,
-              "codexExecutable",
-              executable,
-              (value) => value,
-            )) return;
-            const version = await this.dashboardPlugin.detectCodex();
-            new Notice(`Codex 可用：${version}`);
-          }, () => { new Notice("Codex 检测失败：未检测到可用的 Codex CLI"); });
+      .setName("启用卜筮")
+      .setDesc("在面板中显示头部今日黄历卡与「卜筮」板块（六爻、八字、紫微等）。术数全部本地计算，不联网、不调用大模型；关闭只是不显示，不影响包体积。")
+      .addToggle((toggle) => {
+        toggle.setValue(this.dashboardPlugin.settings.bushiEnabled);
+        toggle.toggleEl.setAttribute("aria-label", "启用卜筮");
+        toggle.onChange((value) => {
+          // 显示类开关:保存成功后立刻让已打开的面板重渲染,不必等下一次整页刷新。
+          void this.commitControl(toggle, "bushiEnabled", value, (enabled) => enabled).then((saved) => {
+            if (saved) this.dashboardPlugin.refreshOpenViews();
+          });
         });
       });
+    new Setting(containerEl)
+      .setName("卜筮解卦")
+      .setDesc("在「今日一牌」与卜筮九个方法（塔罗、小六壬、六爻、太乙、大六壬、八字、紫微、八字合盘、日运月运）的结果下方显示大模型解卦。用的是下面「直连 API 摘要」那一套接口与模型，卦象本身仍然完全本地计算；关闭只是不生成解卦文字。")
+      .addToggle((toggle) => {
+        toggle.setValue(this.dashboardPlugin.settings.bushiReadingEnabled);
+        toggle.toggleEl.setAttribute("aria-label", "卜筮解卦");
+        toggle.onChange((value) => {
+          void this.commitControl(toggle, "bushiReadingEnabled", value, (enabled) => enabled).then((saved) => {
+            if (saved) this.dashboardPlugin.refreshOpenViews();
+          });
+        });
+      });
+    new Setting(containerEl)
+      .setName("解卦发送所问之事")
+      .setDesc("打开：面板里手写的「问题」（塔罗、小六壬、六爻、太乙、大六壬有这一栏）会随卦象一起发送给上面配置的模型。关闭：只发方法名与卦象事实行，问题不出本机。牌面图、盘面图、笔记内容、缓存都不会发送。")
+      .addToggle((toggle) => {
+        toggle.setValue(this.dashboardPlugin.settings.bushiReadingSendsQuestion);
+        toggle.toggleEl.setAttribute("aria-label", "解卦发送所问之事");
+        toggle.onChange((value) => {
+          void this.commitControl(toggle, "bushiReadingSendsQuestion", value, (enabled) => enabled);
+        });
+      });
+
+    new Setting(containerEl).setName("直连 API 摘要").setHeading();
+    new Setting(containerEl)
+      .setName("接口地址")
+      .setDesc("OpenAI 兼容接口根地址，如 https://opencode.ai/zen/go/v1。留空则不生成今日摘要与报告。")
+      .addText((text) => {
+        text.setValue(this.dashboardPlugin.settings.apiSummarizer.providerBaseURL);
+        text.inputEl.setAttribute("aria-label", "API 摘要接口地址");
+        text.inputEl.addEventListener("change", () => {
+          const raw = text.getValue();
+          // 这一格的格式校验只依赖用户输入，不依赖 settings，可以留在事件时刻。
+          const preview = normalizeApiSummarizer({
+            ...this.dashboardPlugin.settings.apiSummarizer,
+            providerBaseURL: raw,
+          });
+          if (preview.providerBaseURL !== "" &&
+            preview.providerBaseURL.replace(/\/+$/, "") !== raw.trim().replace(/\/+$/, "")) {
+            return void new Notice("接口地址无效，设置未保存");
+          }
+          void this.commitControl(
+            text,
+            "apiSummarizer",
+            // 落盘用的对象等队列轮到它时再按当时的设置拼装，避免覆盖前一次改动。
+            (current) => normalizeApiSummarizer({ ...current, providerBaseURL: raw }),
+            (value) => value.providerBaseURL,
+          );
+        });
+      });
+    new Setting(containerEl)
+      .setName("API 模型")
+      .setDesc("接口侧的模型 id，如 glm-5.3-flash。")
+      .addText((text) => {
+        text.setValue(this.dashboardPlugin.settings.apiSummarizer.model);
+        text.inputEl.setAttribute("aria-label", "API 摘要模型");
+        text.inputEl.addEventListener("change", () => {
+          const raw = text.getValue();
+          void this.commitControl(
+            text,
+            "apiSummarizer",
+            (current) => normalizeApiSummarizer({ ...current, model: raw }),
+            (value) => value.model,
+          );
+        });
+      });
+    new Setting(containerEl)
+      .setName("API 密钥环境变量名")
+      .setDesc("只保存环境变量的名字（如 OPENCODE_API_KEY）；密钥值本身在 Obsidian 启动环境中读取，不写入插件数据。")
+      .addText((text) => {
+        text.setValue(this.dashboardPlugin.settings.apiSummarizer.apiKeyEnv);
+        text.inputEl.setAttribute("aria-label", "API 密钥环境变量名");
+        text.inputEl.addEventListener("change", () => {
+          const raw = text.getValue();
+          void this.commitControl(
+            text,
+            "apiSummarizer",
+            (current) => normalizeApiSummarizer({ ...current, apiKeyEnv: raw }),
+            (value) => value.apiKeyEnv,
+          );
+        });
+      });
+
 
     new Setting(containerEl).setName("GitHub").setHeading();
     this.addGithubSecretSetting();
@@ -196,6 +279,53 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
       });
   }
 
+  private addFolderListSetting(
+    name: string,
+    description: string,
+    key: FolderListKey,
+  ): void {
+    new Setting(this.containerEl)
+      .setName(name)
+      .setDesc(description)
+      .addTextArea((area) => {
+        area.setValue(this.dashboardPlugin.settings[key].join("\n"));
+        area.inputEl.rows = 4;
+        area.inputEl.setAttribute("aria-label", name);
+        area.inputEl.addEventListener("change", () => {
+          const parsed = parseVaultFolderLines(area.getValue());
+          if (!parsed.ok) return void new Notice("文件夹路径必须是安全的 Vault 相对路径");
+          void this.commitControl(
+            area,
+            key,
+            parsed.folders,
+            (folders) => folders.join("\n"),
+          ).then((saved) => {
+            if (!saved) return;
+            this.reportMissingFolders(parsed.folders, key);
+            // The next scan picks the new scope up; no Vault file event fires here.
+            this.dashboardPlugin.refreshLocalViews();
+          });
+        });
+      });
+  }
+
+  /**
+   * A folder that does not exist yet is a valid setting (the user may create it
+   * later), but it must never fail silently: an unknown task folder collects
+   * nothing at all, which reads as "the plugin is broken".
+   */
+  private reportMissingFolders(folders: readonly string[], key: FolderListKey): void {
+    const missing = missingVaultFolders(folders, (path) => {
+      const target = this.app.vault.getAbstractFileByPath(path);
+      return target !== null && "children" in target;
+    });
+    if (missing.length === 0) return;
+    const consequence = key === "taskIncludeFolders"
+      ? "待办列表会为空"
+      : "这些文件夹里的复选框不会被排除";
+    new Notice(`Vault 中还不存在：${missing.join("、")}（${consequence}）`, 10_000);
+  }
+
   private addGithubSecretSetting(): void {
     let names: string[] | null = null;
     try {
@@ -233,18 +363,27 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
     });
   }
 
+  /**
+   * 把一次设置改动排进串行队列并落盘。
+   *
+   * `value` 允许传函数：`{...settings.apiSummarizer, model}` 这类拼装必须等到队列
+   * 轮到它时才求值。否则「改完地址马上改模型」的第二次提交会拿事件时刻的旧对象
+   * 整体覆盖第一次的改动，地址改动静默丢失（队列外的读-改-写）。
+   */
   private async commitControl<K extends keyof AgentDashboardSettings, TDisplay>(
     control: SettingValueControl<TDisplay>,
     key: K,
-    value: AgentDashboardSettings[K],
+    value: AgentDashboardSettings[K] | ((current: AgentDashboardSettings[K]) => AgentDashboardSettings[K]),
     display: (value: AgentDashboardSettings[K]) => TDisplay,
   ): Promise<boolean> {
     const result = await this.saveActions.run(async () => {
-      const previous = cloneSettingValue(this.dashboardPlugin.settings[key]);
+      const current = this.dashboardPlugin.settings[key];
+      const resolved = typeof value === "function" ? value(current) : value;
+      const previous = cloneSettingValue(current);
       const saved = await commitControlValue(
         control,
         previous,
-        value,
+        resolved,
         display,
         async (next) => {
           await this.dashboardPlugin.updateSetting(key, next);
@@ -256,10 +395,6 @@ export class AgentDashboardSettingTab extends PluginSettingTab {
     }, () => { new Notice("保存设置失败，已恢复原值"); });
     return result === true;
   }
-}
-
-function cloneSettingValue<T>(value: T): T {
-  return (Array.isArray(value) ? [...value] : value) as T;
 }
 
 export class ConfirmationModal extends Modal {

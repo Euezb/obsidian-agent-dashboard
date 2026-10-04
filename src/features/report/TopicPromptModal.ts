@@ -1,4 +1,4 @@
-/* eslint-disable obsidianmd/ui/sentence-case -- Chinese UI preserves product names and standard acronyms. */
+ 
 import { Modal, Setting } from "obsidian";
 import type { App } from "obsidian";
 
@@ -26,7 +26,7 @@ export class TopicPromptModal extends Modal {
 
   onOpen(): void {
     this.contentEl.createEl("h2", { text: "深度研究报告" });
-    this.contentEl.createEl("p", { text: "输入研究主题，Codex 将以只读方式研究并生成 Markdown 报告到报告文件夹。" });
+    this.contentEl.createEl("p", { text: "输入研究主题，插件会把主题发送到已配置的直连 API，并把生成的 Markdown 报告写入报告文件夹。" });
     new Setting(this.contentEl)
       .setName("研究主题")
       .addText((text) => {

@@ -11,7 +11,10 @@ import {
   createRefreshKey,
   type RefreshCoordinator,
 } from "../../infrastructure/RefreshCoordinator";
+import { describeFailure } from "../../infrastructure/errorDetail";
+import { localCalendarDate } from "../../domain/localDate";
 import type { GitHubPeriod } from "./githubTrending";
+
 import { GitHubRateLimitError, MAX_GITHUB_REPOSITORIES } from "./githubTrending";
 
 /** Minimal cache surface the feed service needs; allows routing different
@@ -28,8 +31,27 @@ export const FEED_CACHE_NAMES = Object.freeze({
   dailyBrief: "ai-news-summary",
 });
 
+/**
+ * 必须落在 Vault 里的缓存名（其余走插件数据目录，不占同步空间）。
+ *
+ * 路由名单原先硬编码在 main.ts 的 `new Set([FEED_CACHE_NAMES.aiNews])` 里
+ * （审查 D7）：改缓存名却忘了改名单位置就会静默走错目录。放在这里和缓存名本身
+ * 相邻，并由测试锚定这份名单。
+ */
+export const VAULT_ROUTED_CACHE_NAMES: ReadonlySet<string> = Object.freeze(
+  new Set<string>([FEED_CACHE_NAMES.aiNews]),
+);
+
 const STALE_MESSAGE = "暂时使用缓存";
 const MAX_NEWS_ITEMS = 20;
+
+/**
+ * Automatic daily-summary attempts per local calendar day, per plugin session.
+ * A single failure must not consume the whole day (the brief is the panel's
+ * main payload), but a broken endpoint must not be re-hit on every 5-minute
+ * tick either. The manual 重试摘要 action stays unlimited.
+ */
+export const MAX_AUTO_SUMMARY_ATTEMPTS = 3;
 
 interface RefreshResult<T> {
   data: T;
@@ -41,6 +63,12 @@ const githubDailyKey = createRefreshKey<RefreshResult<TrendingRepo[]>>("github-d
 const githubWeeklyKey = createRefreshKey<RefreshResult<TrendingRepo[]>>("github-weekly");
 const aiNewsKey = createRefreshKey<RefreshResult<NewsItem[]>>("ai-news-sources");
 const dailyBriefKey = createRefreshKey<DailyBrief | undefined>("daily-ai-brief");
+/**
+ * 手动「重试摘要」自己的键。自动门禁那条路径的契约是「门禁没过就返回 undefined」，
+ * 手动这条是「必须拿到一份摘要，否则抛错」。两者共用一个键时，手动点击若落在
+ * 门禁阶段就会被去重到那个 promise 上：摘要根本没生成，却报「生成失败（原因：unavailable）」。
+ */
+const dailyBriefManualKey = createRefreshKey<DailyBrief>("daily-brief-manual");
 
 export interface ExternalDashboardState {
   githubDaily: ModuleState<TrendingRepo[]>;
@@ -57,6 +85,7 @@ export interface DailyBriefRunner {
   cancel?(taskId: "daily-ai-brief"): void;
 }
 
+
 export interface SummaryAttemptStore {
   get(): Promise<string | undefined>;
   mark(date: string): Promise<void>;
@@ -64,6 +93,7 @@ export interface SummaryAttemptStore {
 
 export interface FeedSummaryOptions {
   runner?: DailyBriefRunner;
+
   attemptStore?: SummaryAttemptStore;
   autoSummaryEnabled?: () => boolean;
   /** Best-effort hook invoked after a brief is generated (e.g. persist into the daily note). */
@@ -92,6 +122,8 @@ type CacheRead<T> = CacheReadResult<T> | { status: "io-error" };
 
 export class FeedService {
   private authoritativeState: ExternalDashboardState | undefined;
+  /** Automatic summary attempts already spent for one local date in this session. */
+  private autoSummaryAttempts: { date: string; count: number } = { date: "", count: 0 };
 
   constructor(
     private readonly cache: FeedCachePort,
@@ -180,20 +212,24 @@ export class FeedService {
       message: undefined,
     });
     safeEmit(onState, state);
+    let refreshedNews = false;
     try {
       if (module === "dailyBrief") {
-        const runner = this.summary.runner;
-        if (runner === undefined) throw new Error("unavailable");
-        const brief = await this.coordinator.runOnce(dailyBriefKey, () =>
-          this.runAndCacheDailyBrief(runner, localCalendarDate(this.now())));
-        if (brief === undefined) throw new Error("unavailable");
+        // 手动重试走独立键：不会被自动门禁那次「可能返回 undefined」的运行劫持。
+        const date = localCalendarDate(this.now());
+        const brief = await this.coordinator.runOnce(dailyBriefManualKey, () =>
+          this.runAndCacheDailyBrief(date));
         state = this.updateModule("dailyBrief", briefState(brief));
+        // 手动生成也算「今天已经出过摘要」：不记账的话同一天的自动门禁还会再跑一次。
+        const store = this.summary.attemptStore;
+        if (store !== undefined) await this.recordSummaryDay(store, date);
       } else if (module === "aiNews") {
         const result = await this.coordinator.runOnce(
           aiNewsKey,
           () => this.refreshAiNewsAndCache(),
         );
         state = this.updateModule(module, refreshedModuleState(module, result));
+        refreshedNews = true;
       } else if (module === "githubDaily") {
         const result = await this.coordinator.runOnce(
           githubDailyKey,
@@ -210,7 +246,10 @@ export class FeedService {
     } catch (error) {
       const current = this.authoritativeState ?? state;
       if (module === "dailyBrief") {
-        state = this.updateModule(module, retryFailureState(module, current.dailyBrief, error));
+        state = this.updateModule(module, {
+          ...retryFailureState(module, current.dailyBrief, error),
+          message: briefFailureMessage("今日摘要生成失败", error),
+        });
       } else if (module === "aiNews") {
         state = this.updateModule(module, retryFailureState(module, current.aiNews, error));
       } else if (module === "githubDaily") {
@@ -220,10 +259,62 @@ export class FeedService {
       }
     }
     safeEmit(onState, state);
+    if (refreshedNews) {
+      // A manual news retry that finally succeeds must not leave today's brief
+      // waiting for the next 5-minute tick: re-run the daily gate with it.
+      await this.maybeAutoSummary(this.authoritativeState ?? state, (value) => {
+        state = this.updateModule("dailyBrief", value);
+        safeEmit(onState, state);
+      });
+    }
   }
 
   async refreshAiNews(): Promise<NewsItem[]> {
     return (await this.refreshAiNewsAndCache()).data;
+  }
+
+  /**
+   * Headlines for the daily brief. The summarizer must not repeat the whole
+   * Hacker News crawl the panel just performed: that crawl is slow and a
+   * transient feed failure would turn into a failed summary even though the
+   * panel is showing usable headlines. So reuse the refreshed module state,
+   * then the persisted cache, and only crawl when nothing usable exists.
+   */
+  async latestNews(): Promise<NewsItem[]> {
+    const known = this.authoritativeState?.aiNews.data ?? [];
+    if (known.length > 0) return known;
+    const cached = await this.safeRead(FEED_CACHE_NAMES.aiNews, isNewsItemArray);
+    if ((cached.status === "fresh" || cached.status === "stale") &&
+      cached.envelope.data.length > 0) {
+      return cached.envelope.data;
+    }
+    return (await this.refreshAiNewsAndCache()).data;
+  }
+
+  private attemptsSpent(date: string): number {
+    return this.autoSummaryAttempts.date === date ? this.autoSummaryAttempts.count : 0;
+  }
+
+  /** Spends one automatic attempt for the day; false once the budget is used up. */
+  private consumeAutoSummaryAttempt(date: string): boolean {
+    const spent = this.attemptsSpent(date);
+    if (spent >= MAX_AUTO_SUMMARY_ATTEMPTS) return false;
+    this.autoSummaryAttempts = { date, count: spent + 1 };
+    return true;
+  }
+
+  /**
+   * The persisted gate is written only once a brief was actually produced, so a
+   * failed attempt never burns the rest of the day. Recording stays best-effort:
+   * the brief is already usable, and `isCurrentBrief` keeps the next open from
+   * regenerating it.
+   */
+  private async recordSummaryDay(store: SummaryAttemptStore, date: string): Promise<void> {
+    try {
+      await store.mark(date);
+    } catch (error) {
+      console.warn("[agent-dashboard] Recording today's summary date failed:", error);
+    }
   }
 
   private adoptInitialState(candidate: ExternalDashboardState): ExternalDashboardState {
@@ -256,9 +347,11 @@ export class FeedService {
       this.hackerNews.fetch(),
       this.collectRss([...this.rssFeeds()]),
     ]);
+    // 逐条过滤，而不是「整批通过才采用」：一个字段缺失的条目不该让整个来源消失。
+    // 单条 guard 复用 combineNews 内部已在用的写法（isNewsItemArray 只看数组元素）。
     const usable = settled.flatMap((result) =>
-      result.status === "fulfilled" && isNewsItemArray(result.value)
-        ? result.value
+      result.status === "fulfilled" && Array.isArray(result.value)
+        ? result.value.filter((item) => isNewsItemArray([item]))
         : [],
     );
     const news = combineNews(usable);
@@ -271,6 +364,15 @@ export class FeedService {
       data: news,
     });
     return { data: news, generatedAt, persisted };
+  }
+
+  /**
+   * 慢读（readStableAttemptGate 里的 store.get()）期间可能已经有更新的摘要落地；
+   * 这时旧的回写必须让位，否则会把刚生成的结果覆盖成 error。
+   */
+  private hasFresherBrief(timestamp: number): boolean {
+    const current = this.authoritativeState?.dailyBrief;
+    return current !== undefined && isCurrentBrief(current.data, timestamp);
   }
 
   private async maybeAutoSummary(
@@ -300,13 +402,15 @@ export class FeedService {
           });
         }
       }
-      const runner = this.summary.runner;
       const attemptStore = this.summary.attemptStore;
-      if (runner === undefined || attemptStore === undefined ||
-        this.summary.autoSummaryEnabled?.() === false || state.aiNews.status !== "ready" ||
-        state.aiNews.data.length === 0) return;
+      if (this.summary.runner === undefined ||
+        attemptStore === undefined ||
+        this.summary.autoSummaryEnabled?.() === false ||
+        !hasSummarizableNews(state.aiNews, timestamp)) return;
       const initialGate = await readStableAttemptGate(attemptStore, this.now);
-      if (initialGate === undefined || initialGate.alreadyAttempted) {
+      if (initialGate === undefined || initialGate.alreadyAttempted ||
+        this.attemptsSpent(initialGate.date) >= MAX_AUTO_SUMMARY_ATTEMPTS) {
+        if (this.hasFresherBrief(timestamp)) return;
         update({ status: "error", data: fallbackBrief, message: "今日摘要尚未生成" });
         return;
       }
@@ -314,30 +418,35 @@ export class FeedService {
       const brief = await this.coordinator.runOnce(dailyBriefKey, async () => {
         const finalGate = await readStableAttemptGate(attemptStore, this.now);
         if (finalGate === undefined || finalGate.alreadyAttempted) return undefined;
-        await attemptStore.mark(finalGate.date);
-        return this.runAndCacheDailyBrief(runner, finalGate.date);
+        if (!this.consumeAutoSummaryAttempt(finalGate.date)) return undefined;
+        const produced = await this.runAndCacheDailyBrief(finalGate.date);
+        await this.recordSummaryDay(attemptStore, finalGate.date);
+        return produced;
       });
       if (brief === undefined) {
-        const current = this.authoritativeState?.dailyBrief;
-        if (current !== undefined && isCurrentBrief(current.data, timestamp)) return;
+        if (this.hasFresherBrief(timestamp)) return;
         update({ status: "error", data: fallbackBrief, message: "今日摘要尚未生成" });
       } else {
         update(briefState(brief));
       }
-    } catch {
-      update({ status: "error", data: fallbackBrief, message: "今日摘要尚未生成" });
+    } catch (error) {
+      if (this.hasFresherBrief(timestamp)) return;
+      update({
+        status: "error",
+        data: fallbackBrief,
+        message: briefFailureMessage("今日摘要生成失败", error),
+      });
     }
   }
 
   private async runAndCacheDailyBrief(
-    runner: DailyBriefRunner,
     date: string,
   ): Promise<DailyBrief> {
-    const brief = await runner.runDailyBrief(date);
+    const brief = await this.requireRunner().runDailyBrief(date);
     await this.writeBestEffort(FEED_CACHE_NAMES.dailyBrief, {
       schemaVersion: CACHE_SCHEMA_VERSION,
       generatedAt: brief.generatedAt,
-      source: "codex-daily-ai-brief",
+      source: "api-daily-brief",
       data: brief,
     });
     try {
@@ -346,6 +455,13 @@ export class FeedService {
       console.warn("[agent-dashboard] Persisting the daily brief into the daily note failed:", error);
     }
     return brief;
+  }
+
+  private requireRunner(): DailyBriefRunner {
+    const runner = this.summary.runner;
+    // 面板会把这条原因原文显示给用户，不要再漏出英文的 "unavailable"。
+    if (runner === undefined) throw new Error("直连 API 未配置");
+    return runner;
   }
 
   /** Cancels an in-flight daily brief generation without unloading the runner. */
@@ -374,21 +490,22 @@ export class FeedService {
       throw new FeedRefreshError("github");
     }
     const generatedAt = this.now();
-    await this.writeBestEffort(cacheName, {
+    const persisted = await this.writeBestEffort(cacheName, {
       schemaVersion: CACHE_SCHEMA_VERSION,
       generatedAt,
       source: `github-${period}`,
       data: repositories,
     });
-    return { data: repositories, generatedAt };
+    return { data: repositories, generatedAt, persisted };
   }
 
   private async writeBestEffort<T>(name: string, envelope: CacheEnvelope<T>): Promise<boolean> {
     try {
       await this.cache.write(name, envelope);
       return true;
-    } catch {
+    } catch (error) {
       // Fresh network data remains usable; a later open will retry persistence.
+      console.warn(`[agent-dashboard] Writing the ${name} cache failed:`, error);
       return false;
     }
   }
@@ -453,12 +570,17 @@ function refreshedModuleState<T extends NewsItem[] | TrendingRepo[]>(
   module: RefreshableModule,
   result: RefreshResult<T>,
 ): ModuleState<T> {
-  if (module === "aiNews" && result.persisted === false) {
+  if (result.persisted === false) {
+    // The fetched data is usable and stays visible; only its cache entry is
+    // missing. That must not stay silent: after a restart the panel would show
+    // older data with no explanation.
     return {
       status: "error",
       data: result.data,
       updatedAt: result.generatedAt,
-      message: "资讯已更新，但缓存写入失败；今日摘要未生成。",
+      message: module === "aiNews"
+        ? "资讯已更新，但缓存写入失败。"
+        : "榜单已更新，但缓存写入失败。",
     };
   }
   return { status: "ready", data: result.data, updatedAt: result.generatedAt };
@@ -482,6 +604,11 @@ function mergeInitialModule<T>(
   return current;
 }
 
+/** Adds the redacted failure reason to the panel message (see errorDetail). */
+function briefFailureMessage(message: string, error: unknown): string {
+  return describeFailure(message, error);
+}
+
 function retryFailureState<T>(
   module: RetryableExternalModule,
   current: ModuleState<T>,
@@ -494,7 +621,7 @@ function retryFailureState<T>(
   return {
     status: "error",
     data: current.data,
-    message: module === "dailyBrief" ? "今日摘要尚未生成" :
+    message: module === "dailyBrief" ? "今日摘要生成失败" :
       retryAt !== undefined ? "GitHub 请求过于频繁。" :
         module === "aiNews" ? "AI 新闻暂不可用。" : "GitHub 榜单暂不可用。",
     retryAt,
@@ -511,14 +638,22 @@ function isCurrentBrief(brief: DailyBrief | null, now: number): boolean {
   return brief.date === date && localCalendarDate(brief.generatedAt) === date;
 }
 
-export function localCalendarDate(timestamp: number): string {
-  const date = new Date(timestamp);
-  return [
-    String(date.getFullYear()).padStart(4, "0"),
-    String(date.getMonth() + 1).padStart(2, "0"),
-    String(date.getDate()).padStart(2, "0"),
-  ].join("-");
+/**
+ * Headlines an automatic summary may legitimately use. A failed refresh keeps
+ * the previous cache on screen under the "stale" status: that is still fine
+ * while the list is today's, but yesterday's headlines must never be presented
+ * as today's brief. Manual retries bypass this gate.
+ */
+function hasSummarizableNews(state: ModuleState<NewsItem[]>, now: number): boolean {
+  if (state.data.length === 0) return false;
+  if (state.status !== "stale") return true;
+  return state.updatedAt !== undefined &&
+    localCalendarDate(state.updatedAt) === localCalendarDate(now);
 }
+
+// 日期键的唯一实现在 domain/localDate（审查 D6）；这里转出一次，
+// 既有引用路径保持有效。
+export { localCalendarDate };
 
 function initialListState<T>(read: CacheRead<T[]>): ModuleState<T[]> {
   if (read.status === "fresh") {
@@ -633,6 +768,10 @@ export function isDailyBrief(value: unknown): value is DailyBrief {
     !isOwnFiniteNumber(value, "generatedAt") ||
     !Number.isInteger(value.generatedAt) || (value.generatedAt as number) < 0 ||
     !Number.isFinite(new Date(value.generatedAt as number).getTime()) ||
+    // Pre-overview caches are intentionally invalid: they repeat item rows the
+    // news list already shows, so they must regenerate once.
+    !isOwnString(value, "overview") ||
+    (value.overview as string).length > 8_192 ||
     !hasOwn(value, "items") || !Array.isArray(value.items)) return false;
   return value.items.every((item) => isRecord(item) &&
     isOwnString(item, "title") &&

@@ -2,7 +2,7 @@ import type { CacheEnvelope, CacheReadResult, DataGuard } from "../domain/cacheS
 import type { FeedCachePort } from "../features/feeds/FeedService";
 
 /**
- * Routes cache entries to different physical locations by cache name. Codex
+ * Routes cache entries to different physical locations by cache name. The
  * inputs (e.g. ai-news-sources) must stay inside the Vault so the sandboxed
  * CLI can read them; everything else lives in the plugin data folder so it
  * stays out of sync, search, and the graph.

@@ -80,6 +80,20 @@ describe("CacheMaintenance", () => {
     expect(port.files.has(cacheFile("user-note.md"))).toBe(true);
   });
 
+  it("also clears quarantined and interrupted write artifacts of allowlisted caches", async () => {
+    const port = new MemoryPort();
+    port.files.set(cacheFile("ai-news-summary.corrupt-1790575952901.json"), "{}");
+    port.files.set(cacheFile("github-daily.tmp-2000-nonce.json"), "{}");
+    port.files.set(cacheFile("github-daily.json"), "{}");
+    port.files.set(cacheFile("ai-news-summary-extra.json"), "keep");
+    port.files.set(cacheFile("user-note.md"), "keep");
+
+    await expect(maintenance(port).regenerate()).resolves.toBe(3);
+
+    expect(port.files.has(cacheFile("ai-news-summary-extra.json"))).toBe(true);
+    expect(port.files.has(cacheFile("user-note.md"))).toBe(true);
+  });
+
   it("returns zero only for an explicitly missing cache directory", async () => {
     const port = new MemoryPort();
     port.missingDirectory = true;
