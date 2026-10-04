@@ -4,6 +4,11 @@ import { VIEW_TYPE } from "./constants";
 
 /** Long-generation budget for the direct-HTTP summarizer and report commands. */
 const SUMMARY_REQUEST_TIMEOUT_MS = 180_000;
+/**
+ * 解牌的预算。解卦走思考模式(thinking + reasoning_effort: max),落笔前先想,
+ * 同一卦六爻实测 80 秒,紫微/八字这类盘面更大 —— 180 秒那份摘要预算不够用。
+ */
+const READING_REQUEST_TIMEOUT_MS = 300_000;
 import type { DashboardTask, NewsItem, TrendingRepo, VaultHealth } from "./domain/types";
 import { AgentDashboardSettingTab } from "./settings/AgentDashboardSettingTab";
 import { mergeSettings } from "./settings/settings";
@@ -93,6 +98,10 @@ export default class AgentDashboardPlugin extends Plugin {
       (options) => requestUrl(options),
       SUMMARY_REQUEST_TIMEOUT_MS,
     );
+    const readingRequest = createObsidianRequestPort(
+      (options) => requestUrl(options),
+      READING_REQUEST_TIMEOUT_MS,
+    );
 
     // Feed caches live in the plugin data folder, out of sync and search.
     const adapterStorage = new ObsidianCacheStorage(this.app.vault.adapter);
@@ -116,6 +125,8 @@ export default class AgentDashboardPlugin extends Plugin {
     let feedServiceRef: { latestNews(): Promise<NewsItem[]> } | null = null;
     const apiSummarizer = new ApiSummarizerService({
       request: summaryRequest,
+      // 解牌单独走长超时那条通道,摘要与报告不受影响。
+      readingRequest,
       settings: () => this.settings,
       fetchNews: async () => feedServiceRef?.latestNews() ?? [],
       readEnvironment: (name) => process.env[name],

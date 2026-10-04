@@ -12,6 +12,11 @@ import { isCalendarDate } from "../../domain/localDate";
 
 export interface ApiSummarizerDependencies {
   request: RequestPort;
+  /**
+   * 解牌用的那条通道。思考模式让解卦慢得多(max 档实测 80 秒起),
+   * 所以它单独一份更长的超时;不给就与 request 同一条。
+   */
+  readingRequest?: RequestPort;
   settings: () => AgentDashboardSettings;
   fetchNews: () => Promise<NewsItem[]>;
   /** Environment lookup so the key value never enters plugin data. */
@@ -48,6 +53,35 @@ const REPORT_SYSTEM_PROMPT =
 
 /** Providers that reject unknown parameters may refuse the thinking switch. */
 const THINKING_DISABLED = { type: "disabled" };
+const THINKING_ENABLED = { type: "enabled" };
+
+/**
+ * 解牌(今日一牌 + 卜筮九法)走「想清楚再落笔」:同一套接口、同一个模型,
+ * 只把思考打开并拉到最高档。deepseek 系模型用 reasoning_effort 分档
+ * (none/low/high/max),max 同时把 thinking 模式的默认输出预算从 64K 提到 128K。
+ * 摘要与报告不动 —— 那是「只许复述输入」的活,思考只会让它更慢更贵。
+ */
+const DIVINATION_REASONING_EFFORT = "max";
+
+/** 一个请求要带的思考档位;摘要与报告固定 "disabled",只有解牌走 "max"。 */
+export type SummarizerThinking = "disabled" | "max";
+
+/**
+ * 每个档位要按顺序试的请求片段,后面的都是在前面被 400 拒掉时的退路。
+ *
+ * 降级只减参数、不改方向:解牌那一路**永远**不会退成 thinking:disabled ——
+ * 网关不认 reasoning_effort 时,思考该开还是开着。
+ */
+function thinkingAttempts(mode: SummarizerThinking): Array<Record<string, unknown>> {
+  if (mode === "max") {
+    return [
+      { thinking: THINKING_ENABLED, reasoning_effort: DIVINATION_REASONING_EFFORT },
+      { thinking: THINKING_ENABLED },
+      {},
+    ];
+  }
+  return [{ thinking: THINKING_DISABLED }, {}];
+}
 
 export class ApiSummarizerError extends Error {
   constructor(message: string) {
@@ -212,9 +246,13 @@ export class ApiSummarizerService {
   }
 
   /**
-   * 塔罗解牌:同一个接口、同一套配置,但用另一套提示词与略高的温度。
+   * 塔罗解牌:同一个接口、同一套配置,但用另一套提示词、略高的温度,以及最高档的思考。
    * 摘要要保守(只许用输入里的事实),解牌本来就是在牌义上做解释,
    * 0.2 那样低的温度会让每张牌都写成同一句套话。
+   *
+   * 思考是这里唯一和摘要分道扬镳的地方:解牌要「先想清楚再落笔」,
+   * 而不是把牌义表复述一遍。注意 deepseek 在思考模式下会忽略 temperature,
+   * 那个 0.55 只是留给不支持思考的网关的退路。
    */
   async runDivinationReading(prompt: { system: string; user: string }): Promise<string> {
     const content = await this.complete(
@@ -222,7 +260,7 @@ export class ApiSummarizerService {
         { role: "system", content: prompt.system },
         { role: "user", content: prompt.user },
       ],
-      { temperature: 0.55 },
+      { temperature: 0.55, thinking: "max", request: this.dependencies.readingRequest },
     );
     const text = stripFences(content).trim();
     if (text === "") throw new InvalidApiSummarizerOutputError();
@@ -248,10 +286,15 @@ export class ApiSummarizerService {
     return { ...brief, generatedAt: this.dependencies.now?.() ?? Date.now() };
   }
 
-  /** Posts one chat-completions request, disabling thinking when supported. */
+  /** Posts one chat-completions request, at the thinking level the caller asked for. */
   private async complete(
     messages: Array<{ role: "system" | "user"; content: string }>,
-    options: { temperature?: number } = {},
+    options: {
+      temperature?: number;
+      thinking?: SummarizerThinking;
+      /** 走哪条通道:解牌给长超时那条,不给就与摘要共用。 */
+      request?: RequestPort;
+    } = {},
   ): Promise<string> {
     const api = this.dependencies.settings().apiSummarizer;
     if (api.providerBaseURL === "" || api.model === "" || api.apiKeyEnv === "") {
@@ -259,7 +302,8 @@ export class ApiSummarizerService {
     }
     const apiKey = this.dependencies.readEnvironment?.(api.apiKeyEnv);
     if (apiKey === undefined || apiKey.trim() === "") throw new ApiKeyMissingError(api.apiKeyEnv);
-    const request = (withThinking: boolean) => this.dependencies.request({
+    const port = options.request ?? this.dependencies.request;
+    const post = (thinking: Record<string, unknown>) => port({
       url: joinUrl(api.providerBaseURL, "chat/completions"),
       method: "POST",
       headers: {
@@ -272,13 +316,14 @@ export class ApiSummarizerService {
         model: api.model,
         messages,
         temperature: options.temperature ?? 0.2,
-        ...(withThinking ? { thinking: THINKING_DISABLED } : {}),
+        ...thinking,
       }),
     });
-    let response = await request(true);
-    if (response.status === 400) {
-      // Some providers reject unknown parameters; retry once without the switch.
-      response = await request(false);
+    const attempts = thinkingAttempts(options.thinking ?? "disabled");
+    let response = await post(attempts[0] ?? {});
+    // Some providers reject unknown parameters; drop them one at a time.
+    for (let index = 1; index < attempts.length && response.status === 400; index += 1) {
+      response = await post(attempts[index] ?? {});
     }
     if (response.status !== 200) {
       throw new ApiSummarizerError(summarizeHttpFailure(response.status, response.text));

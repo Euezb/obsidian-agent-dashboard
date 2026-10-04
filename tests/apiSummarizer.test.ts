@@ -46,29 +46,45 @@ interface HarnessOptions {
   environment?: Record<string, string>;
   settings?: Partial<ApiSummarizerSettings>;
   rejectThinking?: boolean;
+  rejectReasoningEffort?: boolean;
 }
 
+type RecordedRequest = { url: string; headers?: Record<string, string>; body?: string };
+
 function harness(options: HarnessOptions = {}) {
-  const requests: Array<{ url: string; headers?: Record<string, string>; body?: string }> = [];
+  const requests: RecordedRequest[] = [];
+  const readingRequests: RecordedRequest[] = [];
   const responseBody = options.response?.body ??
     '{"overview":"今日综述","items":[{"i":1,"summary":"OpenAI 暂停训练。"},{"i":2,"summary":"TinyAI 竞技场上线。"}]}';
+  const respond = async (requestOptions: RecordedRequest) => {
+    if (options.rawResponse !== undefined) {
+      return { status: options.rawResponse.status, text: options.rawResponse.text };
+    }
+    const body = options.response?.body;
+    if (options.response !== undefined && typeof body === "object" && body !== null && "errorStatus" in body) {
+      return { status: (body as { errorStatus: number }).errorStatus, text: "" };
+    }
+    if (options.rejectThinking === true && (requestOptions.body ?? "").includes("thinking")) {
+      return { status: 400, text: '{"error":"unknown parameter thinking"}' };
+    }
+    if (options.rejectReasoningEffort === true &&
+      (requestOptions.body ?? "").includes("reasoning_effort")) {
+      return { status: 400, text: '{"error":"unknown parameter reasoning_effort"}' };
+    }
+    const text = typeof body === "string"
+      ? JSON.stringify({ choices: [{ message: { content: body } }] })
+      : JSON.stringify(body ?? { choices: [{ message: { content: responseBody } }] });
+    return { status: options.response?.status ?? 200, text };
+  };
   const service = new ApiSummarizerService({
     request: async (requestOptions) => {
       requests.push(requestOptions);
-      if (options.rawResponse !== undefined) {
-        return { status: options.rawResponse.status, text: options.rawResponse.text };
-      }
-      const body = options.response?.body;
-      if (options.response !== undefined && typeof body === "object" && body !== null && "errorStatus" in body) {
-        return { status: (body as { errorStatus: number }).errorStatus, text: "" };
-      }
-      if (options.rejectThinking === true && (requestOptions.body ?? "").includes("thinking")) {
-        return { status: 400, text: '{"error":"unknown parameter thinking"}' };
-      }
-      const text = typeof body === "string"
-        ? JSON.stringify({ choices: [{ message: { content: body } }] })
-        : JSON.stringify(body ?? { choices: [{ message: { content: responseBody } }] });
-      return { status: options.response?.status ?? 200, text };
+      return respond(requestOptions);
+    },
+    // 解牌单独一条通道（长超时）；解牌测试要断言它真的走了这条。
+    readingRequest: async (requestOptions) => {
+      readingRequests.push(requestOptions);
+      return respond(requestOptions);
     },
     settings: () => ({ ...createDefaultSettings(), apiSummarizer: apiSettings(options.settings) }),
     fetchNews: async () => NEWS,
@@ -77,7 +93,7 @@ function harness(options: HarnessOptions = {}) {
     now: () => Date.parse("2026-09-28T12:00:00.000Z"),
     nonce: () => "fixed-session",
   });
-  return { service, requests };
+  return { service, requests, readingRequests };
 }
 
 const DAY = "2026-09-28";
@@ -210,6 +226,53 @@ describe("ApiSummarizerService", () => {
         .service.runDailyBrief(DAY),
     ).rejects.toBeInstanceOf(InvalidApiSummarizerOutputError);
     await expect(harness().service.runDailyBrief("2026-02-30")).rejects.toBeInstanceOf(ApiSummarizerError);
+  });
+
+  it("runs a reading with thinking enabled at the highest reasoning effort", async () => {
+    const { service, requests, readingRequests } = harness({
+      response: { status: 200, body: "牌面在说：先收，再放。" },
+    });
+    const text = await service.runDivinationReading({ system: "S", user: "U" });
+
+    expect(text).toBe("牌面在说：先收，再放。");
+    // 解牌走长超时那条通道，摘要通道一次都不该被碰。
+    expect(requests).toHaveLength(0);
+    expect(readingRequests).toHaveLength(1);
+    const body = JSON.parse(readingRequests[0]?.body ?? "{}") as {
+      thinking: unknown;
+      reasoning_effort: unknown;
+      temperature: number;
+    };
+    expect(body.thinking).toEqual({ type: "enabled" });
+    expect(body.reasoning_effort).toBe("max");
+    expect(body.temperature).toBe(0.55);
+  });
+
+  it("drops reasoning_effort first and never downgrades a reading to thinking disabled", async () => {
+    const { service, readingRequests: requests } = harness({
+      rejectReasoningEffort: true,
+      response: { status: 200, body: "解牌正文" },
+    });
+    const text = await service.runDivinationReading({ system: "S", user: "U" });
+
+    expect(text).toBe("解牌正文");
+    expect(requests).toHaveLength(2);
+    expect((requests[1]?.body ?? "").includes("reasoning_effort")).toBe(false);
+    expect(JSON.parse(requests[1]?.body ?? "{}").thinking).toEqual({ type: "enabled" });
+    // 降级只减参数：解牌任何一次尝试都不许把思考关掉。
+    expect(requests.some((attempt) => (attempt.body ?? "").includes('"disabled"'))).toBe(false);
+  });
+
+  it("keeps a reading running when the gateway rejects every thinking parameter", async () => {
+    const { service, readingRequests: requests } = harness({
+      rejectThinking: true,
+      response: { status: 200, body: "解牌正文" },
+    });
+    const text = await service.runDivinationReading({ system: "S", user: "U" });
+
+    expect(text).toBe("解牌正文");
+    expect(requests).toHaveLength(3);
+    expect(requests.some((attempt) => (attempt.body ?? "").includes('"disabled"'))).toBe(false);
   });
 
   it("runText returns the assistant text and keeps the session header", async () => {
