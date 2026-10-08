@@ -26,6 +26,8 @@ export interface ReadingSlotState {
   status: DivinationReadingStatus;
   text?: string;
   message?: string;
+  /** 长断卦是否已展开。与卦象结果同一份 storage,跨整页重渲染保留。 */
+  expanded?: boolean;
 }
 
 export interface ReadingSlotOptions {
@@ -72,6 +74,14 @@ export function createReadingSlot(options: ReadingSlotOptions): ReadingSlot {
         ...stateOf(),
         meta: options.meta?.(),
         onRetry: () => request(),
+        // 展开状态写回同一份 storage:整页重渲染(心跳、切方法)回来还是展开的。
+        onToggleExpand: () => {
+          options.storage.reading = {
+            ...stateOf(),
+            expanded: stateOf().expanded !== true,
+          };
+          paint();
+        },
       },
       { label: options.label },
     );

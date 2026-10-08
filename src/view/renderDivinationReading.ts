@@ -12,6 +12,12 @@ import { createElement } from "./domHelpers";
 
 export type DivinationReadingStatus = "idle" | "loading" | "ready" | "error" | "off";
 
+/**
+ * 超过这个字数就折叠。断卦放宽到 600–1200 字之后,通栏会拉得很长;
+ * 按字符算(中文一字一符),420 字大约是折叠后八行的量。
+ */
+export const READING_COLLAPSE_THRESHOLD = 420;
+
 export interface DivinationReadingViewState {
   status: DivinationReadingStatus;
   /** ready:正文。段落之间空一行,【标题】独占一行。 */
@@ -21,6 +27,15 @@ export interface DivinationReadingViewState {
   /** 口径小字,例如「glm-5.3-flash · 10:28 生成」。 */
   meta?: string;
   onRetry?: () => void;
+  /** 长断卦是否已展开;缺省按折叠处理。 */
+  expanded?: boolean;
+  /**
+   * 给了它才启用「展开全文 / 收起」。
+   *
+   * 折叠状态由宿主保存(卜筮面板存在自己的 storage 里、今日一牌存在控制器里),
+   * 这样整页重渲染回来时,用户展开过的那一篇还是展开的 —— 5 分钟一次心跳都会重建 DOM。
+   */
+  onToggleExpand?: () => void;
 }
 
 export interface DivinationReadingNoteOptions {
@@ -99,14 +114,25 @@ function appendFoot(
   body: HTMLElement,
   state: DivinationReadingViewState,
   label: string,
+  collapsible: boolean,
 ): void {
-  if (state.meta === undefined && state.onRetry === undefined) return;
+  const toggle = collapsible ? state.onToggleExpand : undefined;
+  if (state.meta === undefined && state.onRetry === undefined && toggle === undefined) return;
   const foot = doc.createElement("p");
   foot.className = "ad-note__foot";
   if (state.meta !== undefined && state.meta !== "") {
     const meta = doc.createElement("span");
     meta.textContent = state.meta;
     foot.append(meta);
+  }
+  if (toggle !== undefined) {
+    const button = doc.createElement("button");
+    button.type = "button";
+    button.className = "ad-inline-action";
+    button.textContent = state.expanded === true ? "收起" : "展开全文";
+    button.setAttribute("aria-expanded", String(state.expanded === true));
+    button.addEventListener("click", toggle);
+    foot.append(button);
   }
   if (state.onRetry !== undefined) {
     const retry = state.onRetry;
@@ -146,8 +172,18 @@ export function renderDivinationReadingNote(
   note.append(body);
 
   if (state.status === "ready") {
-    appendReadingBody(doc, body, state.text ?? "");
-    appendFoot(doc, body, state, label);
+    // 正文单独包一层:折叠只压正文,页脚(口径小字与按钮)始终露在外面。
+    const text = createElement(host, "div");
+    text.className = "ad-note__text";
+    body.append(text);
+    appendReadingBody(doc, text, state.text ?? "");
+    const collapsible = state.onToggleExpand !== undefined &&
+      (state.text ?? "").length > READING_COLLAPSE_THRESHOLD;
+    if (collapsible) {
+      note.classList.add("ad-note--collapsible");
+      if (state.expanded !== true) note.classList.add("ad-note--collapsed");
+    }
+    appendFoot(doc, body, state, label, collapsible);
   } else {
     const pending = createElement(host, "p");
     pending.className = "ad-note__pending";
@@ -155,7 +191,7 @@ export function renderDivinationReadingNote(
     pending.textContent = state.message ??
       (state.status === "loading" ? `正在${label}…` : `${label}暂不可用。`);
     body.append(pending);
-    if (state.status === "error") appendFoot(doc, body, state, label);
+    if (state.status === "error") appendFoot(doc, body, state, label, false);
   }
 
   host.append(note);

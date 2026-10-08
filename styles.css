@@ -3206,6 +3206,15 @@ body.theme-dark .workspace-leaf-content[data-type="agent-dashboard-view"] .ad-in
 	margin-top: 8px;
 }
 
+/* 长断卦:默认只露前八行,点「展开全文」看全。
+   折叠只压正文那一层,页脚(口径小字与按钮)在折叠区外,始终看得见。 */
+.ad-note--collapsed .ad-note__text {
+	max-height: 16em;
+	overflow: hidden;
+	-webkit-mask-image: linear-gradient(180deg, #000 72%, transparent 100%);
+	mask-image: linear-gradient(180deg, #000 72%, transparent 100%);
+}
+
 .ad-note__section {
 	margin-top: var(--ad-space-2);
 	color: var(--ad-primary-strong);

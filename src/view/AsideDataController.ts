@@ -140,6 +140,14 @@ export class AsideDataController {
           text,
           meta: this.readingMeta(),
           onRetry: () => this.refreshFortuneReading(true),
+          // 今日一牌通常不到折叠线;真写长了(模型没守字数)也得让人能展开。
+          onToggleExpand: () => {
+            this.fortuneReading = {
+              ...this.fortuneReading,
+              expanded: this.fortuneReading.expanded !== true,
+            };
+            this.dependencies.onChanged();
+          },
         };
         this.dependencies.onChanged();
       })

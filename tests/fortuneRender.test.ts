@@ -136,8 +136,9 @@ describe("今日运势板块", () => {
     expect(container.querySelector(".ad-note__tab")?.textContent).toBe("解牌");
     // 题签挂在读牌那一栏里,不是另起一块:牌右边那片空白正是它的位置。
     expect(container.querySelector(".ad-reading .ad-note")).not.toBeNull();
+    // 正文多了一层 .ad-note__text(折叠只压这一层,页脚留在外面),所以按正文层取段落。
     expect(
-      container.querySelectorAll(".ad-note__body > p:not(.ad-note__section):not(.ad-note__foot)"),
+      container.querySelectorAll(".ad-note__text p:not(.ad-note__section):not(.ad-note__foot)"),
     ).toHaveLength(2);
     expect(container.querySelector(".ad-note__foot")?.textContent).toContain("glm-5.3-flash");
     expect(container.querySelector(".ad-note__foot button")?.textContent).toBe("重新解牌");
