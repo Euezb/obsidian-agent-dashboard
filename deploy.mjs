@@ -12,18 +12,35 @@ import process from 'node:process';
  * 软链会让两个 vault 共用同一份设置、互相覆盖。所以只能是「一次构建、多处复制」——
  * 那就要有个地方把「多处」记下来，免得又出现「改了但只改了一半」。
  *
- * 用法：npm run deploy（会先跑一次 npm run build）。
+ * vault 路径是本机信息，不入库：从 work/local-paths.json 读
+ * （没有就复制 work/local-paths.example.json 改一改）。
+ *
+ * 用法：npm run deploy（会先跑一次 npm run build）；node deploy.mjs --dry-run 只看目标。
  */
-const VAULTS = [
-	'<vault A>',
-	'<vault B>',
-];
 
 const PLUGIN_ID = 'agent-dashboard';
 /** 发布物：manifest 也一起发，版本号变了要跟着走。 */
 const ARTIFACTS = ['main.js', 'manifest.json', 'styles.css'];
 
 const root = import.meta.dirname;
+
+/** vault 根目录列表：本机路径只出现在 work/local-paths.json 里。 */
+async function readVaults() {
+	const file = path.join(root, 'work', 'local-paths.json');
+	let raw;
+	try {
+		raw = await readFile(file, 'utf8');
+	} catch {
+		throw new Error(`缺少 ${file} —— 复制 work/local-paths.example.json 改成这台机器的路径再跑。`);
+	}
+	const parsed = JSON.parse(raw);
+	const vaults = (Array.isArray(parsed?.vaults) ? parsed.vaults : [])
+		.map((entry) =>
+			entry !== null && typeof entry === 'object' && typeof entry.path === 'string' ? entry.path : '')
+		.filter((entry) => entry !== '');
+	if (vaults.length === 0) throw new Error(`${file} 里没有可用的 vaults[].path。`);
+	return vaults;
+}
 
 function stamp(now = new Date()) {
 	const pad = (value) => String(value).padStart(2, '0');
@@ -80,6 +97,20 @@ async function deployTo(vault, backupName) {
 }
 
 async function main() {
+	let vaults;
+	try {
+		vaults = await readVaults();
+	} catch (error) {
+		console.error(error.message);
+		process.exitCode = 1;
+		return;
+	}
+	if (process.argv.includes('--dry-run')) {
+		console.log(`试运行：只打印目标，不复制任何文件。vault ${vaults.length} 个：`);
+		for (const vault of vaults) console.log(`  ${vault}`);
+		return;
+	}
+
 	const missing = ARTIFACTS.filter((name) => !existsSync(path.join(root, name)));
 	if (missing.includes('main.js') || missing.includes('styles.css')) {
 		console.error(`缺少构建产物：${missing.join('、')} —— 先跑 npm run build。`);
@@ -89,7 +120,7 @@ async function main() {
 
 	const backupName = `.backup-${stamp()}`;
 	const results = [];
-	for (const vault of VAULTS) {
+	for (const vault of vaults) {
 		results.push(await deployTo(vault, backupName));
 	}
 

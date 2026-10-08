@@ -18,6 +18,12 @@ main.js
 # 塔罗素材的下载缓存(work/build-tarot-assets.ps1);成品在 assets/tarot/
 work/tarot-720/
 
+# 本机路径(不入库):复制 work/local-paths.example.json 生成
+work/local-paths.json
+
+# agent 工作流草稿目录(浏览器原型、事件日志之类)
+.superpowers/
+
 # obsidian
 data.json
 

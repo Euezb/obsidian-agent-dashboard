@@ -1,0 +1,7 @@
+{
+	"_comment": "复制成 work/local-paths.json 并改成这台机器上的路径（那个文件被 .gitignore 排除，不会进仓库）。name 只是表格里显示的名字；path 是 vault 根目录，插件目录由脚本拼成 <path>\\.obsidian\\plugins\\agent-dashboard。",
+	"vaults": [
+		{ "name": "Main vault", "path": "C:\\vaults\\main" },
+		{ "name": "Test vault", "path": "C:\\vaults\\test" }
+	]
+}

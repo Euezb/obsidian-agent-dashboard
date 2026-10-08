@@ -24,11 +24,11 @@ npm run build
 npm run lint
 ```
 
-Only three release artifacts are code: `main.js`, `manifest.json`, and `styles.css`. The tarot card art lives beside them in `assets/tarot/`, so a full install copies four paths. For this Vault layout:
+Only three release artifacts are code: `main.js`, `manifest.json`, and `styles.css`. The tarot card art lives beside them in `assets/tarot/`, so a full install copies four paths. Machine-specific paths are not in this repo: `work/local-paths.json` (gitignored — copy `work/local-paths.example.json` to create it) holds the vault roots, and `work/deploy.ps1` / `npm run deploy` do the copy for both vaults. A manual copy looks like this, with the two placeholders filled in:
 
 ```powershell
 $source = '<source root>'
-$target = '<vault A>\.obsidian\plugins\agent-dashboard'
+$target = '<vault>\.obsidian\plugins\agent-dashboard'
 New-Item -ItemType Directory -Path $target -Force | Out-Null
 Copy-Item "$source\main.js","$source\manifest.json","$source\styles.css" -Destination $target -Force
 Copy-Item "$source\assets" -Destination $target -Recurse -Force

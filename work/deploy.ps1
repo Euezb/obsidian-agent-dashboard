@@ -3,6 +3,9 @@
 # 为什么要写成脚本:同一个插件在两个 vault 里各有一份副本(见 AGENTS.md),
 # 只更新一份就会出现「关掉再打开没变化」——2026-09-30 已经踩过一次。
 #
+# vault 路径是本机信息,不入库:从 work/local-paths.json 读
+# (没有就复制 work/local-paths.example.json 改一改)。源码根目录按脚本位置推。
+#
 # 用法:
 #   pwsh -File work/deploy.ps1              # 构建 + 部署
 #   pwsh -File work/deploy.ps1 -SkipBuild   # 只用现有的 main.js 部署
@@ -13,11 +16,19 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$root = "<source root>"
+$localPaths = Join-Path $PSScriptRoot "local-paths.json"
+if (-not (Test-Path $localPaths)) {
+	throw "缺少 $localPaths —— 复制 work/local-paths.example.json 改成这台机器的路径再跑。"
+}
+$config = Get-Content $localPaths -Raw -Encoding UTF8 | ConvertFrom-Json
+$root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $targets = @(
-	@{ Vault = "Obsidian Vault"; Path = "<vault A>\.obsidian\plugins\agent-dashboard" },
-	@{ Vault = "提示词测试脚本"; Path = "<vault B>\.obsidian\plugins\agent-dashboard" }
+	foreach ($vault in @($config.vaults)) {
+		if (-not $vault.path) { continue }
+		@{ Vault = $vault.name; Path = (Join-Path $vault.path ".obsidian\plugins\agent-dashboard") }
+	}
 )
+if ($targets.Count -eq 0) { throw "$localPaths 里没有可用的 vaults[].path。" }
 
 if (-not $SkipBuild) {
 	Write-Host "构建…"
