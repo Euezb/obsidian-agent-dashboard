@@ -68,6 +68,8 @@ export class DivinationReadingService implements DivinationReadingPort {
       const prompt = buildDivinationReadingPrompt(effective);
       const text = parseDivinationReading(
         await this.dependencies.generator.runDivinationReading(prompt),
+        // 结构校验按类型走:术数四段、今日一牌三段散文。
+        effective.kind,
       );
       this.remember(key, text);
       return text;

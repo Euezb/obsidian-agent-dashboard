@@ -258,7 +258,8 @@ describe("ApiSummarizerService", () => {
     expect(text).toBe("解牌正文");
     expect(requests).toHaveLength(2);
     expect((requests[1]?.body ?? "").includes("reasoning_effort")).toBe(false);
-    expect(JSON.parse(requests[1]?.body ?? "{}").thinking).toEqual({ type: "enabled" });
+    const secondAttempt = JSON.parse(requests[1]?.body ?? "{}") as { thinking?: unknown };
+    expect(secondAttempt.thinking).toEqual({ type: "enabled" });
     // 降级只减参数：解牌任何一次尝试都不许把思考关掉。
     expect(requests.some((attempt) => (attempt.body ?? "").includes('"disabled"'))).toBe(false);
   });

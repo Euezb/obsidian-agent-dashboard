@@ -7,8 +7,9 @@ const SUMMARY_REQUEST_TIMEOUT_MS = 180_000;
 /**
  * 解牌的预算。解卦走思考模式(thinking + reasoning_effort: max),落笔前先想,
  * 同一卦六爻实测 80 秒,紫微/八字这类盘面更大 —— 180 秒那份摘要预算不够用。
+ * 2026-10 提示词放宽到 600–1200 字之后,「想得久 + 写得多」会顶到 300 秒,故提到 600 秒。
  */
-const READING_REQUEST_TIMEOUT_MS = 300_000;
+const READING_REQUEST_TIMEOUT_MS = 600_000;
 import type { DashboardTask, NewsItem, TrendingRepo, VaultHealth } from "./domain/types";
 import { AgentDashboardSettingTab } from "./settings/AgentDashboardSettingTab";
 import { mergeSettings } from "./settings/settings";
