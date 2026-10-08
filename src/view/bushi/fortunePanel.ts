@@ -48,7 +48,58 @@ interface FortuneStorage {
   reading?: ReadingSlotState;
 }
 
-/** 解卦请求:日运看当天干支与本命日主的关系;月运看流月与逐日的分布。 */
+/** 流日的一行(与 FortuneStorage.monthDays 同形)。 */
+interface MonthDayEntry {
+  date: string;
+  ganZhi: string;
+  tenGod: string;
+}
+
+/** 旬:月内按日号三等分(01–10 / 11–20 / 21–月末)。 */
+const XUN_NAMES = ["上旬", "中旬", "下旬"] as const;
+
+/** 日号:日期库给的是不是补零的 ISO 都认;解析不了按 1 算(落上旬)。 */
+function dayOfMonth(date: string): number {
+  const match = /^\d{4}-(\d{1,2})-(\d{1,2})$/.exec(date);
+  return match === null ? 1 : Number(match[2]);
+}
+
+/** 「2026-09-01」与「2026-9-1」都写成 09-01:提示词与标签里的日期要一个写法。 */
+function monthDayText(date: string): string {
+  const match = /^\d{4}-(\d{1,2})-(\d{1,2})$/.exec(date);
+  if (match === null) return date;
+  return `${(match[1] ?? "").padStart(2, "0")}-${(match[2] ?? "").padStart(2, "0")}`;
+}
+
+/**
+ * 月运的逐日数据折成三条旬事实。
+ *
+ * 不逐日发给模型:输出侧要 600–1200 字、【逐条】只给几行,31 天逐日既写不下、
+ * 也读不出重点;旬与提示词给月运定的口径(月运以旬给进退)一致。
+ * 但每一天都要原样落在某一旬里 —— 只发前十天,模型就只会断前十天。
+ */
+function xunFacts(monthDays: ReadonlyArray<MonthDayEntry>): DivinationReadingFact[] {
+  const groups = XUN_NAMES.map((name) => ({ name, entries: [] as MonthDayEntry[] }));
+  for (const entry of monthDays) {
+    const day = dayOfMonth(entry.date);
+    const index = day <= 10 ? 0 : day <= 20 ? 1 : 2;
+    groups[index]?.entries.push(entry);
+  }
+  return groups.filter((group) => group.entries.length > 0).map((group) => {
+    const pad = (value: number): string => String(value).padStart(2, "0");
+    const dayNumbers = group.entries.map((entry) => dayOfMonth(entry.date));
+    const days = group.entries
+      .map((entry) => `${monthDayText(entry.date)} ${entry.ganZhi}${entry.tenGod}`)
+      .join("；");
+    // 不附「本旬十神：各一天」这类统计:天干十位一轮,一整旬里十神必然每样一天,
+    // 那是零信息;旬与旬的差别在起止日支与具体落在哪几天。
+    // 标签要能被解卦块的行正则认出来:不含空格、不超 14 字。
+    const range = `${pad(Math.min(...dayNumbers))}–${pad(Math.max(...dayNumbers))}`;
+    return { label: `${group.name}（${range}）`, value: days };
+  });
+}
+
+/** 解卦请求:日运看当天干支与本命日主的关系;月运看流月与逐旬的进退。 */
 function readingRequestOf(storage: FortuneStorage): DivinationReadingRequest | null {
   const dayMaster = storage.dayMaster ?? "";
   const day = storage.day;
@@ -70,18 +121,19 @@ function readingRequestOf(storage: FortuneStorage): DivinationReadingRequest | n
       },
       {
         label: "流月与本命",
-        value: `十神${monthSummary.tenGod} · 纳音${monthSummary.naYin} · 地势${monthSummary.diShi}`,
+        value: [
+          monthSummary.tenGod === "" ? "" : `十神${monthSummary.tenGod}`,
+          monthSummary.naYin === "" ? "" : `纳音${monthSummary.naYin}`,
+          monthSummary.diShi === "" ? "" : `地势${monthSummary.diShi}`,
+          elementRelationNote(dayMaster, monthSummary.ganZhi.slice(0, 1), "月"),
+        ].filter((part) => part !== "").join(" · "),
       },
       {
         label: "当月十神分布",
         value: [...byTenGod.entries()].map(([name, count]) => `${name}${count}天`).join(" · "),
       },
-      {
-        label: "逐日干支（前 10 天）",
-        value: monthDays.slice(0, 10)
-          .map((entry) => `${entry.date} ${entry.ganZhi}${entry.tenGod === "" ? "" : entry.tenGod}`)
-          .join("；"),
-      },
+      // 逐日是三条旬事实,不是「前十天」:全月的每一天都在里面。
+      ...xunFacts(monthDays),
     ];
     return {
       kind: "method",
@@ -103,8 +155,15 @@ function readingRequestOf(storage: FortuneStorage): DivinationReadingRequest | n
     { label: "当日干支", value: `${day.date} ${ganZhi}日` },
     { label: "当日十神", value: tenGodOf(dayMaster, day.dayInfo?.stem ?? "") },
   ];
-  if (suitable.length > 0) facts.push({ label: "宜", value: suitable.join("、") });
-  if (avoid.length > 0) facts.push({ label: "忌", value: avoid.join("、") });
+  const relation = elementRelationNote(dayMaster, day.dayInfo?.stem ?? "", "日");
+  if (relation !== "") facts.push({ label: "日主与当日五行", value: relation });
+  // 宜忌合成一条:它们是黄历给的字段,不是可逐条断的项 ——
+  // 拆成「宜」「忌」两行,【逐条】就会照着标签把黄历再复述一遍。
+  const yiJi = [
+    suitable.length > 0 ? `宜 ${suitable.join("、")}` : "",
+    avoid.length > 0 ? `忌 ${avoid.join("、")}` : "",
+  ].filter((part) => part !== "");
+  if (yiJi.length > 0) facts.push({ label: "黄历宜忌", value: yiJi.join("；") });
   const lunarDate = typeof almanac.lunarDate === "string" ? almanac.lunarDate : "";
   const chongSha = typeof almanac.chongSha === "string" ? almanac.chongSha : "";
   if (lunarDate !== "" || chongSha !== "") {

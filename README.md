@@ -139,7 +139,7 @@ In a shaped spread each slot keeps a compact caption — index, position, card n
 **解卦** is optional and covers **every** 卜筮 method plus 今日一牌 — 塔罗、小六壬、六爻、太乙、大六壬、八字、紫微、八字合盘、日运月运. It uses the same endpoint, model, and key environment variable as the daily brief; there is no second place to configure it. Turn it on with **卜筮解卦** and decide with **解卦发送所问之事** whether the question you typed is sent along with the cast:
 
 - Each panel folds its own result into labelled facts — positions and cards for 塔罗, the three palaces for 小六壬, 用神/动爻/旬空 for 六爻, 三传/课体 for 大六壬, 主星/吉凶征 for 太乙, 四柱十神/柱间关系 for 八字, 命宫三方四正/四化 for 紫微, both charts for 八字合盘, the day's or month's 干支 against the birth day master for 日运月运. Those labels are the ones the model must reuse for its per-item lines, so the reply stays anchored to what the panel actually computed.
-- The reading renders as the same 解卦 slip under the result (今日一牌 keeps its 解牌 slip inline next to the card), with `【总断】`, one line per fact, and `【可行】`.
+- The reading renders as the same 解卦 slip under the result (今日一牌 keeps its 解牌 slip inline next to the card): `【总断】`, `【逐条】` (one line per fact; 日运月运 groups the month by 旬 instead of one line per day), `【应期】` and `【可行】`.
 - A reading is requested once per cast — keyed by the panel's own seed (draw seed, four pillars, cast inputs, chart inputs) and the fact fingerprint — and cached in memory for the session, so re-renders, panel switches, and the 5-minute tick never re-send a request. Reopening Obsidian asks again for the current casts.
 - Failures keep the chart on screen and offer a retry; when the switch is off or the endpoint is not configured, no request is made and the panels keep their local-only wording instead of claiming a model was involved.
 
