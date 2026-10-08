@@ -15,6 +15,21 @@ function mount(storage: Record<string, unknown>): { host: HTMLElement; cleanup: 
 }
 
 describe("baziPanel", () => {
+  it("小运为空时写明原因,不是少画一行", async () => {
+    // 1980-01-07 10:00 实测起运不足 1 岁,库直接返回空小运。
+    const { host, cleanup } = mount({
+      birthDate: "1980-01-07",
+      birthTime: "10:00",
+      gender: "male",
+    });
+    host.querySelector<HTMLButtonElement>("button.ad-bp-submit")?.click();
+    await flush();
+
+    expect(host.querySelector(".ad-module-state--error")).toBeNull();
+    expect(host.textContent).toContain("起运不足 1 岁，本盘无小运。");
+    cleanup();
+  });
+
   it("renders the birth form with calendar and true-solar controls", () => {
     const { host, cleanup } = mount({});
     expect(host.textContent).toContain("出生日期");

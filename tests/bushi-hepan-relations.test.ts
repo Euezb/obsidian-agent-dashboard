@@ -27,6 +27,17 @@ async function chipsOf(a: Side, b: Side): Promise<{ chips: string[]; verdict: st
   return { chips, verdict };
 }
 
+describe("八字合盘空态", () => {
+  it("首次打开时给出说明,不是整块空白", () => {
+    const host = document.createElement("div");
+    const cleanup = hepanPanel.render(host, {});
+    const notice = host.querySelector(".ad-bp-panel__result .ad-module-state--empty");
+    expect(notice).not.toBeNull();
+    expect(notice?.textContent).toContain("点「合盘」");
+    cleanup();
+  });
+});
+
 describe("八字合盘关系(R2)", () => {
   it("does not invent 半合 for two identical charts", async () => {
     const { chips, verdict } = await chipsOf(side("1990-01-01"), side("1990-01-01"));

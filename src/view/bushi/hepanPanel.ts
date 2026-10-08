@@ -105,6 +105,8 @@ function renderResult(host: HTMLElement, storage: HepanStorage, reading?: Readin
   const a = storage.resultA;
   const b = storage.resultB;
   if (a === undefined || b === undefined) {
+    // 首次打开面板时这里本来是整块空白 —— 空白与「坏了」分不出来。
+    holder.append(createPanelNotice(host, "empty", "填好双方的出生日期与时间后点「合盘」，这里给出四柱、柱间关系与五行互补。"));
     host.replaceChildren(holder);
     return;
   }

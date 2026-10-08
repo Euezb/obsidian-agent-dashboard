@@ -64,6 +64,50 @@ describe("liuyaoPanel", () => {
     cleanup();
   });
 
+  it("库给不出应期时也留一句,不让整节消失", async () => {
+    // 2026-09-01 05 时 + 这句问法实测是「天山遯」,有动爻但应期参考为空。
+    const storage: Record<string, unknown> = {
+      question: "这件事要不要摊开谈",
+      yongShenTargets: ["妻财"],
+      method: "auto",
+      dateValue: "2026-09-01T05:30",
+    };
+    const host = document.createElement("div");
+    const cleanup = liuyaoPanel.render(host, storage);
+    host.querySelector<HTMLButtonElement>("button.ad-bp-submit")?.click();
+    await flush();
+
+    const result = storage.result as { hexagramName: string; timeRecommendations?: unknown[] } | undefined;
+    expect(result?.hexagramName).toBe("天山遯");
+    expect((result?.timeRecommendations ?? []).length).toBe(0);
+    expect(host.textContent).toContain("应期参考：本卦未见明显的应期提示。");
+    cleanup();
+  });
+
+  it("六爻安静时不画变卦栏,但要说清为什么没有变卦", async () => {
+    // 这个种子(2026-09-15 14 时 + 这句问法)实测就是六爻全静的一卦。
+    const storage: Record<string, unknown> = {
+      question: "换一个问法试试",
+      yongShenTargets: ["妻财"],
+      method: "auto",
+      dateValue: "2026-09-15T14:30",
+    };
+    const host = document.createElement("div");
+    const cleanup = liuyaoPanel.render(host, storage);
+    host.querySelector<HTMLButtonElement>("button.ad-bp-submit")?.click();
+    await flush();
+
+    const result = storage.result as { hexagramName: string; changedHexagramName?: string } | undefined;
+    expect(result?.hexagramName).toBe("天水讼");
+    expect(result?.changedHexagramName ?? "").toBe("");
+    // 只有本卦一栏、六爻。
+    expect(host.querySelectorAll(".ad-ly-chart__col")).toHaveLength(1);
+    expect(host.querySelectorAll(".ad-ly-yao")).toHaveLength(6);
+    // 空着的那一栏要自己说清为什么空 —— 否则「本来没有」与「数据丢了」分不出来。
+    expect(host.textContent).toContain("六爻安静，无动爻，故无变卦。");
+    cleanup();
+  });
+
   it("keeps the chart across section re-render", async () => {
     const container = document.createElement("div");
     const session = createXuanxueSessionState();

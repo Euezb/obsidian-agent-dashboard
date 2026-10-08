@@ -35,6 +35,23 @@ describe("ziweiPanel", () => {
     cleanup();
   });
 
+  it("空宫写明「借对宫」,不是留一格空白", async () => {
+    // 1990-01-01 00:00 实测有两处空宫(疾厄、财帛)。
+    const host = document.createElement("div");
+    const cleanup = ziweiPanel.render(host, {
+      birthDate: "1990-01-01",
+      birthTime: "00:00",
+      gender: "male",
+    });
+    host.querySelector<HTMLButtonElement>("button.ad-bp-submit")?.click();
+    await flush();
+
+    const empties = Array.from(host.querySelectorAll(".ad-zw-star--empty"));
+    expect(empties.length).toBeGreaterThan(0);
+    expect(empties[0]?.textContent).toBe("空宫（借对宫）");
+    cleanup();
+  });
+
   it("keeps the chart across section re-render", async () => {
     const container = document.createElement("div");
     const session = createXuanxueSessionState();

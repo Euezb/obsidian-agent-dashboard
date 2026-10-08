@@ -369,6 +369,12 @@ function renderResult(host: HTMLElement, storage: BaziStorage, reading?: Reading
     xiao.className = "ad-bz-dayun__xiaoyun";
     xiao.textContent = `小运：${dayun.xiaoYun.map((item) => `${item.age}岁 ${item.ganZhi}`).join(" · ")}`;
     dayunSection.append(xiao);
+  } else {
+    // 起运不足 1 岁时库直接返回空数组(不是数据丢了):说明一句,免得以为少画了一行。
+    const xiao = doc.createElement("p");
+    xiao.className = "ad-bz-dayun__xiaoyun";
+    xiao.textContent = "小运：起运不足 1 岁，本盘无小运。";
+    dayunSection.append(xiao);
   }
   body.append(dayunSection);
 

@@ -53,4 +53,35 @@ describe("太乙九宫盘面(F7)", () => {
       cleanup();
     }
   });
+
+  it("空宫留白有说明,中宫那颗星不印 undefined", async () => {
+    // 2026-09-20 07:00 实测中宫有星(天符),而库给这颗星的 qimenGate 是 undefined ——
+    // 改之前界面会印出「奇门天禽 undefined」。
+    const host = document.createElement("div");
+    const cleanup = taiyiPanel.render(host, { mode: "hour", dateValue: "2026-09-20T07:00" });
+    host.querySelector<HTMLButtonElement>("button.ad-bp-submit")?.click();
+    await flush();
+
+    const center = Array.from(host.querySelectorAll<HTMLElement>(".ad-ty-palace"))
+      .find((cell) => cell.dataset.gua === "中");
+    expect(center?.textContent).toContain("天符");
+    const chips = Array.from(host.querySelectorAll(".ad-ty-star__detail .ad-bp-chip"))
+      .map((chip) => chip.textContent ?? "");
+    expect(chips).toContain("奇门天禽");
+    expect(host.textContent).not.toContain("undefined");
+    cleanup();
+  });
+
+  it("没有星落位的宫要说清是常态", async () => {
+    const host = document.createElement("div");
+    const cleanup = taiyiPanel.render(host, { mode: "hour", dateValue: "2026-09-29T10:00" });
+    host.querySelector<HTMLButtonElement>("button.ad-bp-submit")?.click();
+    await flush();
+
+    const emptyCells = Array.from(host.querySelectorAll<HTMLElement>(".ad-ty-palace"))
+      .filter((cell) => cell.querySelectorAll(".ad-ty-palace__star").length === 0);
+    expect(emptyCells.length).toBeGreaterThan(0);
+    expect(host.textContent).toContain("九星只落数宫，其余宫位留空为常态。");
+    cleanup();
+  });
 });

@@ -165,10 +165,15 @@ function renderStarCard(host: HTMLElement, star: StarSnapshot | undefined, prima
   card.append(scale, number, position);
   const detail = doc.createElement("div");
   detail.className = "ad-ty-star__detail";
+  // 中宫那颗星(天禽)没有门:库里 qimenGate 是 undefined(实测 336 局里 110 局中宫有星,
+  // 每次都缺门)。直接拼进模板会印出「奇门天禽 undefined」,看着像坏了。
+  const qimenText = [`奇门${star.qimenName}`, star.qimenGate ?? ""]
+    .filter((part) => part !== "")
+    .join(" ");
   detail.append(
     createChip(host, `${star.beidouName}`),
     createChip(host, `玄空${star.xuankongName}`),
-    createChip(host, `奇门${star.qimenName} ${star.qimenGate}`),
+    createChip(host, qimenText),
   );
   const line = doc.createElement("p");
   line.className = "ad-ty-star__line";
@@ -224,7 +229,15 @@ function renderResult(host: HTMLElement, storage: TaiyiStorage, reading?: Readin
     stars.append(others);
     body.append(stars);
     const palaceGrid = renderPalaceGrid(host, board);
-    if (palaceGrid !== null) body.append(palaceGrid);
+    if (palaceGrid !== null) {
+      body.append(palaceGrid);
+      // 实测每局只有 3–4 个宫有星落位(336 局里空 5–6 宫是常态):
+      // 空格子不说一句,读者会以为盘没画完。
+      const palaceNote = doc.createElement("p");
+      palaceNote.className = "ad-ly-line ad-ly-line--muted";
+      palaceNote.textContent = "九星只落数宫，其余宫位留空为常态。";
+      body.append(palaceNote);
+    }
   }
 
   const anchors = output.judgementAnchors;

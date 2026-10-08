@@ -2374,6 +2374,12 @@ body.theme-dark .workspace-leaf-content[data-type="agent-dashboard-view"] .ad-in
 	font-size: 0.64rem;
 }
 
+/* 空宫(无主星):说清是常态并给本门惯例,别让读者只看到一格空白 */
+.ad-zw-star--empty {
+	color: var(--ad-muted);
+	font-style: italic;
+}
+
 .ad-zw-palace__badge {
 	align-self: flex-start;
 	padding: 0 5px;

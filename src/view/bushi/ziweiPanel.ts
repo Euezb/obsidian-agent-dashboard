@@ -136,6 +136,14 @@ function renderPalaceCell(host: HTMLElement, palace: Palace, isSoul: boolean): H
     cell.append(ages);
   }
 
+  if (palace.majorStars.length === 0) {
+    // 空宫是紫微的常规形态(实测 720 宫里有 118 宫无主星,约 16%),
+    // 本门惯例是借对宫安星 —— 不写这一句,读者只会看到一格空白。
+    const empty = doc.createElement("span");
+    empty.className = "ad-zw-star ad-zw-star--empty";
+    empty.textContent = "空宫（借对宫）";
+    cell.append(empty);
+  }
   for (const star of palace.majorStars) {
     const line = doc.createElement("span");
     line.className = "ad-zw-star ad-zw-star--major";

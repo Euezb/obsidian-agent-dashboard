@@ -276,6 +276,14 @@ function renderResult(host: HTMLElement, storage: LiuyaoStorage, reading?: Readi
     note.className = "ad-ly-line ad-ly-line--muted";
     note.textContent = "变卦爻形按动爻翻转绘制;静爻的六亲纳甲取自本卦(本源库只提供动爻的变后信息),动爻显示变后六亲纳甲。";
     chart.append(note);
+  } else {
+    // 六爻安静就没有变卦 —— 这是正常结果(实测约 18% 的卦),不是故障。
+    // 但界面上不留痕迹的话,「本来没有」与「数据丢了」长得一模一样:
+    // 2026-10 用户就是这么误判的。所以空着的那一栏要自己说清为什么空。
+    const quiet = doc.createElement("p");
+    quiet.className = "ad-ly-line ad-ly-line--muted";
+    quiet.textContent = "六爻安静，无动爻，故无变卦。";
+    chart.append(quiet);
   }
   body.append(chart);
 
@@ -350,6 +358,13 @@ function renderResult(host: HTMLElement, storage: LiuyaoStorage, reading?: Readi
     }
     section.append(chips);
     body.append(section);
+  } else {
+    // 应期是读者预期的一段(实测约 6% 的卦里库给不出提示):留一句,
+    // 免得整节消失被读成「漏了」—— 与变卦那一栏同一个道理。
+    const empty = doc.createElement("p");
+    empty.className = "ad-ly-line ad-ly-line--muted";
+    empty.textContent = "应期参考：本卦未见明显的应期提示。";
+    body.append(empty);
   }
 
   const gua = doc.createElement("div");
